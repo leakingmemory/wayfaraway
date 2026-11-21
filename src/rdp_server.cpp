@@ -35,6 +35,14 @@ constexpr UINT32 pdu_header_margin = 1024;
 // Assumed PDU limit for clients that do not advertise multifragment support.
 constexpr UINT32 min_pdu_size = 16 * 1024;
 
+// Frames we allow in flight before waiting for the client to acknowledge one.
+// The client's advertised maximum is honoured, but capped so a slow link does
+// not build up seconds of stale frames.
+constexpr UINT32 default_frames_in_flight = 2;
+constexpr UINT32 max_frames_in_flight = 4;
+// If no acknowledgement arrives for this long, stop waiting for it.
+constexpr int ack_timeout_ms = 1000;
+
 enum class Codec { RemoteFx, NSCodec };
 
 const char* codec_name(Codec codec)
@@ -73,11 +81,13 @@ public:
         : m_server(server)
         , m_client(client)
     {
+        pixman_region32_init(&m_pending);
     }
 
     ~RdpPeer()
     {
         detach();
+        pixman_region32_fini(&m_pending);
         if (m_client) {
             m_client->Disconnect(m_client);
             freerdp_peer_context_free(m_client);
@@ -107,14 +117,29 @@ public:
     }
 
     // Stops processing events; the object is destroyed later.
-    void detach() { remove_sources(m_sources); }
+    void detach()
+    {
+        remove_sources(m_sources);
+        if (m_ack_timer) {
+            wl_event_source_remove(m_ack_timer);
+            m_ack_timer = nullptr;
+        }
+    }
 
+    // Queues `region` for sending; it goes out now unless the client is
+    // still behind on acknowledging earlier frames.
     void send_region(const pixman_region32_t* region);
     void send_full_frame();
     void output_resized();
 
 private:
     bool choose_codec();
+    UINT32 frames_in_flight() const { return m_frame_id - m_last_acked; }
+    bool throttled() const { return m_ack_throttle && frames_in_flight() >= m_max_in_flight; }
+    void flush();
+    void transmit(const pixman_region32_t* region);
+    void arm_ack_timer();
+    static int on_ack_timeout(void* data);
     void encode_rfx(const pixman_region32_t* region);
     void encode_nsc(const pixman_region32_t* region);
     void send_surface_bits(const pixman_box32_t& box, UINT16 codec_id);
@@ -142,6 +167,7 @@ private:
     static BOOL on_extended_mouse(rdpInput* input, UINT16 flags, UINT16 x, UINT16 y);
     static BOOL on_refresh_rect(rdpContext* context, BYTE count, const RECTANGLE_16* areas);
     static BOOL on_suppress_output(rdpContext* context, BYTE allow, const RECTANGLE_16* area);
+    static BOOL on_frame_acknowledge(rdpContext* context, UINT32 frame_id);
 
     RdpServer& m_server;
     freerdp_peer* m_client;
@@ -157,6 +183,19 @@ private:
     bool m_active = false;
     bool m_suppressed = false;
     UINT32 m_frame_id = 0;
+
+    // Damage not yet sent. Pixels always come from the shadow buffer at send
+    // time, so damage that piles up while throttled costs one encode.
+    pixman_region32_t m_pending;
+
+    bool m_ack_throttle = false;
+    bool m_acks_seen = false;
+    // Set once the client proves it advertises acknowledgement but never sends it.
+    bool m_acks_broken = false;
+    UINT32 m_max_in_flight = 0;
+    UINT32 m_last_acked = 0;
+    wl_event_source* m_ack_timer = nullptr;
+    bool m_ack_timer_armed = false;
 };
 
 bool RdpPeer::init()
@@ -203,7 +242,8 @@ bool RdpPeer::init()
         && freerdp_settings_set_bool(s, FreeRDP_HasExtendedMouseEvent, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_HasHorizontalWheel, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_UnicodeInput, FALSE)
-        && freerdp_settings_set_uint32(s, FreeRDP_MultifragMaxRequestSize, 0xFFFFFF);
+        && freerdp_settings_set_uint32(s, FreeRDP_MultifragMaxRequestSize, 0xFFFFFF)
+        && freerdp_settings_set_uint32(s, FreeRDP_FrameAcknowledge, default_frames_in_flight);
     if (!ok) {
         wlr_log(WLR_ERROR, "RDP: failed to configure peer settings");
         return false;
@@ -221,6 +261,7 @@ bool RdpPeer::init()
 
     update()->RefreshRect = &RdpPeer::on_refresh_rect;
     update()->SuppressOutput = &RdpPeer::on_suppress_output;
+    update()->SurfaceFrameAcknowledge = &RdpPeer::on_frame_acknowledge;
 
     if (!m_client->Initialize(m_client)) {
         wlr_log(WLR_ERROR, "RDP: peer initialisation failed");
@@ -293,6 +334,17 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
     pointer.type = SYSPTR_NULL;
     (void)self->update()->pointer->PointerSystem(client->context, &pointer);
 
+    // Frame acknowledgement needs frame markers to number the frames.
+    // After negotiation, FrameAcknowledge holds the client's maximum.
+    const UINT32 client_max = freerdp_settings_get_uint32(s, FreeRDP_FrameAcknowledge);
+    const bool markers = freerdp_settings_get_bool(s, FreeRDP_SurfaceFrameMarkerEnabled);
+    self->m_ack_throttle = client_max > 0 && markers && !self->m_acks_broken;
+    self->m_max_in_flight = std::clamp(client_max, UINT32{ 1 }, max_frames_in_flight);
+    if (self->m_ack_throttle && self->m_frame_id == 0)
+        wlr_log(WLR_INFO, "RDP: frame acknowledgement on, up to %u frames in flight", self->m_max_in_flight);
+    // Frames sent before (re)activation will never be acknowledged.
+    self->m_last_acked = self->m_frame_id;
+
     self->m_active = true;
     self->m_suppressed = false;
     self->send_full_frame();
@@ -335,7 +387,16 @@ void RdpPeer::send_full_frame()
 
 void RdpPeer::send_region(const pixman_region32_t* region)
 {
-    if (!m_active || m_suppressed || !m_server.shadow())
+    // Inactive peers get a full frame on (re)activation anyway.
+    if (!m_active)
+        return;
+    pixman_region32_union(&m_pending, &m_pending, region);
+    flush();
+}
+
+void RdpPeer::flush()
+{
+    if (!m_active || m_suppressed || !m_server.shadow() || !pixman_region32_not_empty(&m_pending))
         return;
 
     rdpSettings* s = settings();
@@ -345,30 +406,91 @@ void RdpPeer::send_region(const pixman_region32_t* region)
         || freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight) != static_cast<UINT32>(height))
         return; // waiting for a desktop resize round-trip
 
-    pixman_region32_t clipped;
-    pixman_region32_init(&clipped);
-    pixman_region32_intersect_rect(&clipped, region, 0, 0, static_cast<unsigned>(width), static_cast<unsigned>(height));
-    if (!pixman_region32_not_empty(&clipped)) {
-        pixman_region32_fini(&clipped);
+    if (throttled()) {
+        arm_ack_timer();
         return;
     }
 
-    const bool markers = freerdp_settings_get_bool(s, FreeRDP_SurfaceFrameMarkerEnabled);
+    pixman_region32_t clipped;
+    pixman_region32_init(&clipped);
+    pixman_region32_intersect_rect(&clipped, &m_pending, 0, 0, static_cast<unsigned>(width),
+        static_cast<unsigned>(height));
+    pixman_region32_clear(&m_pending);
+    if (pixman_region32_not_empty(&clipped))
+        transmit(&clipped);
+    pixman_region32_fini(&clipped);
+}
+
+void RdpPeer::transmit(const pixman_region32_t* region)
+{
+    const bool markers = freerdp_settings_get_bool(settings(), FreeRDP_SurfaceFrameMarkerEnabled);
     rdpContext* context = m_client->context;
     SURFACE_FRAME_MARKER marker{ SURFACECMD_FRAMEACTION_BEGIN, ++m_frame_id };
     if (markers)
         (void)update()->SurfaceFrameMarker(context, &marker);
 
     if (m_codec == Codec::RemoteFx)
-        encode_rfx(&clipped);
+        encode_rfx(region);
     else
-        encode_nsc(&clipped);
+        encode_nsc(region);
 
     if (markers) {
         marker.frameAction = SURFACECMD_FRAMEACTION_END;
         (void)update()->SurfaceFrameMarker(context, &marker);
     }
-    pixman_region32_fini(&clipped);
+}
+
+void RdpPeer::arm_ack_timer()
+{
+    // Armed once per stall: re-arming on every throttled frame would keep
+    // pushing the timeout back while damage keeps coming.
+    if (m_ack_timer_armed)
+        return;
+    if (!m_ack_timer) {
+        m_ack_timer = wl_event_loop_add_timer(compositor().event_loop(), &RdpPeer::on_ack_timeout, this);
+        if (!m_ack_timer)
+            return;
+    }
+    wl_event_source_timer_update(m_ack_timer, ack_timeout_ms);
+    m_ack_timer_armed = true;
+}
+
+int RdpPeer::on_ack_timeout(void* data)
+{
+    auto* self = static_cast<RdpPeer*>(data);
+    self->m_ack_timer_armed = false;
+    if (!self->throttled())
+        return 0;
+
+    if (!self->m_acks_seen) {
+        // The client advertised the capability but never uses it.
+        wlr_log(WLR_INFO, "RDP: %s never acknowledged a frame; disabling frame acknowledgement", self->hostname());
+        self->m_ack_throttle = false;
+        self->m_acks_broken = true;
+    } else {
+        wlr_log(WLR_DEBUG, "RDP: frame acknowledgement timed out with %u in flight", self->frames_in_flight());
+        self->m_last_acked = self->m_frame_id;
+    }
+    self->flush();
+    return 0;
+}
+
+BOOL RdpPeer::on_frame_acknowledge(rdpContext* context, UINT32 frame_id)
+{
+    RdpPeer* self = from(context);
+    self->m_acks_seen = true;
+    // Ignore stale or bogus ids; the comparison is wrap-safe.
+    const auto ahead = static_cast<INT32>(frame_id - self->m_last_acked);
+    const auto sent = static_cast<INT32>(self->m_frame_id - self->m_last_acked);
+    if (ahead > 0 && ahead <= sent)
+        self->m_last_acked = frame_id;
+
+    if (!self->throttled() && self->m_ack_timer_armed) {
+        wl_event_source_timer_update(self->m_ack_timer, 0);
+        self->m_ack_timer_armed = false;
+    }
+    self->flush();
+    return TRUE;
 }
 
 bool RdpPeer::choose_codec()

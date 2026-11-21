@@ -77,8 +77,9 @@ cmake --build build
 
 - Clients that support neither RemoteFX nor NSCodec are refused. Planar/raw
   bitmap fallback and GFX/H.264 are still to come.
-- There's no output backpressure. Frames are sent as fast as they are rendered.
-  Frame acknowledgement should throttle this.
+- Backpressure relies on RDP frame acknowledgement (at most 4 unacknowledged
+  frames; damage is coalesced meanwhile). Clients without it are not throttled
+  yet; socket write-blocking could cover them.
 - Clipboard (cliprdr), audio (rdpsnd) and lock-key synchronisation aren't
   implemented yet.
 - There's no rate limiting of unlock attempts beyond PAM's own fail delay.
