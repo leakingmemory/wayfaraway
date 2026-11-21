@@ -46,10 +46,45 @@ void Server::setup_keyboard()
     m_keyboard_key.connect(&m_keyboard.events.key, [this](void* data) {
         on_key(*static_cast<wlr_keyboard_key_event*>(data));
     });
-    m_keyboard_modifiers.connect(&m_keyboard.events.modifiers, [this](void*) {
-        if (!locked())
-            wlr_seat_keyboard_notify_modifiers(m_seat, &m_keyboard.modifiers);
-    });
+    m_keyboard_modifiers.connect(&m_keyboard.events.modifiers, [this](void*) { on_modifiers(); });
+}
+
+void Server::on_modifiers()
+{
+    // Covers both Caps Lock presses and synchronize events from the client.
+    const bool caps_lock
+        = xkb_state_mod_name_is_active(m_keyboard.xkb_state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_EFFECTIVE) > 0;
+    if (m_lock_screen)
+        m_lock_screen->set_caps_lock(caps_lock);
+    if (!locked())
+        wlr_seat_keyboard_notify_modifiers(m_seat, &m_keyboard.modifiers);
+}
+
+void Server::sync_lock_keys(bool caps_lock, bool num_lock)
+{
+    xkb_keymap* keymap = m_keyboard.keymap;
+    xkb_state* state = m_keyboard.xkb_state;
+    if (!keymap || !state)
+        return;
+
+    // Resolved through the keymap, so this works whichever real modifier a
+    // layout binds NumLock to. Scroll Lock has no modifier in standard
+    // keymaps (it only drives an LED), so it is not synced.
+    const xkb_mod_mask_t caps_mask = xkb_keymap_mod_get_mask(keymap, XKB_MOD_NAME_CAPS);
+    const xkb_mod_mask_t num_mask = xkb_keymap_mod_get_mask(keymap, XKB_VMOD_NAME_NUM);
+
+    const xkb_mod_mask_t locked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
+    xkb_mod_mask_t wanted = locked & ~(caps_mask | num_mask);
+    if (caps_lock)
+        wanted |= caps_mask;
+    if (num_lock)
+        wanted |= num_mask;
+    if (wanted == locked)
+        return;
+
+    wlr_keyboard_notify_modifiers(&m_keyboard, xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+        xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED), wanted,
+        xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_LOCKED));
 }
 
 void Server::inject_key(std::uint32_t evdev_keycode, bool pressed)

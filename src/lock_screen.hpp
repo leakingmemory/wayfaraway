@@ -31,6 +31,10 @@ public:
     // under the current xkb state (empty for non-printing keys).
     void handle_key(xkb_keysym_t sym, std::string_view utf8);
 
+    // Shows a "Caps Lock is on" hint, since an unexpected Caps Lock is the
+    // usual reason a correct password is rejected.
+    void set_caps_lock(bool on);
+
 private:
     static int on_tick(void* data);
     void submit();
@@ -55,6 +59,7 @@ private:
     std::string m_status;
     bool m_status_is_error = false;
     std::string m_rendered_clock;
+    bool m_caps_lock = false;
 };
 
 } // namespace wfa

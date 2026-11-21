@@ -23,7 +23,9 @@ on a lock screen.
   cairo/pango; no client is involved. While the session is locked, the whole desktop
   scene tree is disabled and no client gets keyboard or pointer focus, so nothing
   can leak or race it. The password of the user running the compositor is checked
-  through PAM on a worker thread, so the event loop never blocks.
+  through PAM on a worker thread, so the event loop never blocks. Caps Lock and
+  Num Lock follow the client's state on connect and whenever its window regains
+  focus. The lock screen warns when Caps Lock is on.
 - **Persistence.** The compositor doesn't exit when an RDP client disconnects.
   It locks, and applications keep running. The next connection, from any client,
   lands on the lock screen. A new connection while one is active takes over the
@@ -106,7 +108,7 @@ cmake --build build
   frames; damage is coalesced meanwhile). Clients without it are not throttled
   yet; socket write-blocking could cover them.
 - The clipboard is text-only: images, HTML, files and the primary selection
-  aren't bridged. Lock-key synchronisation isn't implemented yet.
+  aren't bridged.
 - Audio and microphone use plain PCM at a fixed 44.1 kHz. Clients without that
   format get no sound or microphone. Compressed formats such as AAC/Opus, and
   throttling for slow links, are still to come.

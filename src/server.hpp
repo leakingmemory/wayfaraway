@@ -54,6 +54,8 @@ public:
 
     // --- Input injection (used by the RDP server) --------------------------
     void inject_key(std::uint32_t evdev_keycode, bool pressed);
+    // Sets Caps/Num Lock to the client's toggle state (RDP synchronize event).
+    void sync_lock_keys(bool caps_lock, bool num_lock);
     void inject_pointer_motion(double x, double y);
     void inject_pointer_button(std::uint32_t button, bool pressed);
     void inject_pointer_axis(wl_pointer_axis axis, double value, int value120);
@@ -82,6 +84,7 @@ private:
 
     void setup_keyboard();
     void on_key(const wlr_keyboard_key_event& event);
+    void on_modifiers();
     bool handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers);
     void on_unlocked();
 

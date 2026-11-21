@@ -188,6 +188,15 @@ void LockScreen::handle_key(xkb_keysym_t sym, std::string_view utf8)
     render();
 }
 
+void LockScreen::set_caps_lock(bool on)
+{
+    if (on == m_caps_lock)
+        return;
+    m_caps_lock = on;
+    if (m_locked)
+        render();
+}
+
 void LockScreen::submit()
 {
     if (m_password.empty())
@@ -296,9 +305,12 @@ void LockScreen::render()
     y += field_h + 18;
 
     if (!m_status.empty())
-        draw_text(cr, m_status, "Sans 13", cx, y, m_status_is_error ? Rgba{ 0.95, 0.45, 0.50 } : muted);
+        y += draw_text(cr, m_status, "Sans 13", cx, y, m_status_is_error ? Rgba{ 0.95, 0.45, 0.50 } : muted);
     else
-        draw_text(cr, "Type your password and press Enter", "Sans 12", cx, y, { 1, 1, 1, 0.35 });
+        y += draw_text(cr, "Type your password and press Enter", "Sans 12", cx, y, { 1, 1, 1, 0.35 });
+
+    if (m_caps_lock)
+        draw_text(cr, "Caps Lock is on", "Sans Bold 12", cx, y + 10, { 0.96, 0.76, 0.35 });
 
     cairo_destroy(cr);
     cairo_surface_flush(buffer->surface);

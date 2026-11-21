@@ -719,7 +719,9 @@ void RdpPeer::send_surface_bits(const pixman_box32_t& box, UINT16 codec_id)
 
 BOOL RdpPeer::on_synchronize(rdpInput* input, UINT32 flags)
 {
-    // TODO: sync Caps/Num/Scroll lock with the client.
+    // Sent on connect and whenever the client window regains focus, so lock
+    // keys toggled elsewhere on the client do not leave us out of step.
+    from(input->context)->compositor().sync_lock_keys(flags & KBD_SYNC_CAPS_LOCK, flags & KBD_SYNC_NUM_LOCK);
     return TRUE;
 }
 
