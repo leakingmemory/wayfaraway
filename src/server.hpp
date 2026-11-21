@@ -1,0 +1,146 @@
+#pragma once
+
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <set>
+
+#include "authenticator.hpp"
+#include "config.hpp"
+#include "listener.hpp"
+#include "lock_screen.hpp"
+#include "wlr.hpp"
+
+namespace wfa {
+
+class View;
+class RdpServer;
+
+// Receives every rendered frame of the virtual output.
+class FrameSink {
+public:
+    virtual ~FrameSink() = default;
+    // `damage` is in buffer coordinates. Pixels are XRGB8888.
+    virtual void on_frame(const std::byte* pixels, int width, int height, std::size_t stride,
+        const pixman_region32_t* damage) = 0;
+};
+
+class Server {
+public:
+    explicit Server(Config config);
+    ~Server();
+
+    Server(const Server&) = delete;
+    Server& operator=(const Server&) = delete;
+
+    bool start();
+    void run();
+
+    const Config& config() const { return m_config; }
+    wl_event_loop* event_loop() const { return m_loop; }
+
+    // --- Session -----------------------------------------------------------
+    bool locked() const { return m_lock_screen->locked(); }
+    void lock();
+
+    // --- Output ------------------------------------------------------------
+    void set_frame_sink(FrameSink* sink) { m_frame_sink = sink; }
+    void resize_output(int width, int height);
+    int output_width() const { return m_output->width; }
+    int output_height() const { return m_output->height; }
+
+    // --- Input injection (used by the RDP server) --------------------------
+    void inject_key(std::uint32_t evdev_keycode, bool pressed);
+    void inject_pointer_motion(double x, double y);
+    void inject_pointer_button(std::uint32_t button, bool pressed);
+    void inject_pointer_axis(wl_pointer_axis axis, double value, int value120);
+    void release_all_input();
+
+    // --- Window management (used by View) -----------------------------------
+    wlr_scene_tree* desktop_tree() const { return m_desktop_tree; }
+    wlr_seat* seat() const { return m_seat; }
+    wlr_cursor* cursor() const { return m_cursor; }
+    wlr_box output_box() const { return { 0, 0, m_output->width, m_output->height }; }
+
+    void focus_view(View* view);
+    void begin_interactive(View* view, bool resize, std::uint32_t edges);
+    void view_mapped(View* view);
+    void view_unmapped(View* view);
+    void view_destroyed(View* view);
+
+    void spawn(const std::string& command) const;
+
+private:
+    enum class CursorMode { Passthrough, Move, Resize };
+
+    void create_output(wlr_output* output);
+    void output_resized();
+    void render_frame();
+
+    void setup_keyboard();
+    void on_key(const wlr_keyboard_key_event& event);
+    bool handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers);
+    void on_unlocked();
+
+    void process_cursor_motion(std::uint32_t time_msec);
+    void process_cursor_move();
+    void process_cursor_resize();
+    void reset_cursor_mode();
+    View* view_at(double lx, double ly, wlr_surface** surface, double* sx, double* sy) const;
+    void cycle_focus();
+
+    Config m_config;
+
+    wl_display* m_display = nullptr;
+    wl_event_loop* m_loop = nullptr;
+    wlr_backend* m_backend = nullptr;
+    wlr_renderer* m_renderer = nullptr;
+    wlr_allocator* m_allocator = nullptr;
+    wlr_compositor* m_compositor = nullptr;
+    wlr_output_layout* m_output_layout = nullptr;
+    wlr_scene* m_scene = nullptr;
+    wlr_scene_output_layout* m_scene_layout = nullptr;
+    wlr_xdg_shell* m_xdg_shell = nullptr;
+    wlr_seat* m_seat = nullptr;
+    wlr_cursor* m_cursor = nullptr;
+    wlr_xcursor_manager* m_cursor_manager = nullptr;
+
+    wlr_output* m_output = nullptr;
+    wlr_scene_output* m_scene_output = nullptr;
+
+    // Scene layers, bottom to top.
+    wlr_scene_rect* m_background = nullptr;
+    wlr_scene_tree* m_desktop_tree = nullptr;
+    wlr_scene_tree* m_lock_tree = nullptr;
+
+    std::unique_ptr<Authenticator> m_authenticator;
+    std::unique_ptr<LockScreen> m_lock_screen;
+    std::unique_ptr<RdpServer> m_rdp;
+    FrameSink* m_frame_sink = nullptr;
+
+    // Front is the top of the stack / focused view.
+    std::list<std::unique_ptr<View>> m_views;
+
+    wlr_keyboard m_keyboard{};
+    std::set<std::uint32_t> m_pressed_buttons;
+
+    CursorMode m_cursor_mode = CursorMode::Passthrough;
+    View* m_grabbed_view = nullptr;
+    double m_grab_x = 0, m_grab_y = 0;
+    wlr_box m_grab_geobox{};
+    std::uint32_t m_resize_edges = 0;
+
+    Listener m_new_output;
+    Listener m_output_frame;
+    Listener m_output_request_state;
+    Listener m_output_destroy;
+    Listener m_new_toplevel;
+    Listener m_new_popup;
+    Listener m_keyboard_key;
+    Listener m_keyboard_modifiers;
+    Listener m_request_set_cursor;
+    Listener m_request_set_selection;
+    Listener m_request_set_primary_selection;
+};
+
+} // namespace wfa

@@ -1,0 +1,11 @@
+[Unit]
+Description=wayfaraway headless Wayland desktop (RDP)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wayfaraway
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
