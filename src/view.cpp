@@ -216,13 +216,17 @@ void View::update_frame()
         .maximized = maximized(),
         .title = title(),
     };
+    // The buffer has a transparent band around the frame, so the pointer
+    // reaches the frame (to resize) a little outside the window too.
+    constexpr int m = retro::grab_margin;
     if (state != m_frame_state) {
-        CairoBuffer::show(m_frame, state.width, state.height, [&](cairo_t* cr) {
+        CairoBuffer::show(m_frame, state.width + 2 * m, state.height + 2 * m, [&](cairo_t* cr) {
+            cairo_translate(cr, m, m);
             retro::paint_frame(cr, state.width, state.height, state.title, state.active, state.maximized, frame_buttons);
         });
         m_frame_state = std::move(state);
     }
-    wlr_scene_node_set_position(&m_frame->node, geometry.x - retro::frame_left, geometry.y - retro::frame_top);
+    wlr_scene_node_set_position(&m_frame->node, geometry.x - retro::frame_left - m, geometry.y - retro::frame_top - m);
     wlr_scene_node_set_enabled(&m_frame->node, true);
 }
 

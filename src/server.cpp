@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
+#include <system_error>
+#include <vector>
 
 #include <pwd.h>
 #include <sys/wait.h>
@@ -16,6 +19,36 @@
 namespace wfa {
 
 namespace {
+
+// The cursor theme to use: $XCURSOR_THEME, else an installed theme that has
+// cursors. Without one, libxcursor looks for a "default" theme, and if that
+// is missing only wlroots' built-in arrow exists (no resize cursors).
+std::string cursor_theme()
+{
+    if (const char* theme = std::getenv("XCURSOR_THEME"); theme && *theme)
+        return theme;
+    std::vector<std::filesystem::path> bases;
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        bases.emplace_back(std::filesystem::path(home) / ".local/share/icons");
+        bases.emplace_back(std::filesystem::path(home) / ".icons");
+    }
+    bases.emplace_back("/usr/local/share/icons");
+    bases.emplace_back("/usr/share/icons");
+    std::error_code ec;
+    for (const char* preferred : { "default", "Adwaita", "breeze_cursors", "Breeze_Snow", "DMZ-White" }) {
+        for (const auto& base : bases) {
+            if (std::filesystem::is_directory(base / preferred / "cursors", ec))
+                return preferred;
+        }
+    }
+    for (const auto& base : bases) {
+        for (const auto& entry : std::filesystem::directory_iterator(base, ec)) {
+            if (std::filesystem::is_directory(entry.path() / "cursors", ec))
+                return entry.path().filename().string();
+        }
+    }
+    return {};
+}
 
 std::string current_user()
 {
@@ -89,7 +122,17 @@ Server::Server(Config config)
 
     m_cursor = wlr_cursor_create();
     wlr_cursor_attach_output_layout(m_cursor, m_output_layout);
-    m_cursor_manager = wlr_xcursor_manager_create(nullptr, 24);
+    const std::string theme = cursor_theme();
+    if (theme.empty()) {
+        wlr_log(WLR_INFO, "No cursor theme installed; only the default arrow is available");
+    } else {
+        wlr_log(WLR_INFO, "Cursor theme: %s", theme.c_str());
+        // Clients look the theme up themselves; give them the same one.
+        setenv("XCURSOR_THEME", theme.c_str(), 0);
+    }
+    setenv("XCURSOR_SIZE", "24", 0);
+    m_cursor_manager = wlr_xcursor_manager_create(theme.empty() ? nullptr : theme.c_str(), 24);
+    wlr_xcursor_manager_load(m_cursor_manager, 1);
 
     m_seat = wlr_seat_create(m_display, "seat0");
     wlr_seat_set_capabilities(m_seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);

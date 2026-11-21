@@ -32,6 +32,9 @@ inline constexpr int frame_left = border;
 inline constexpr int frame_right = border;
 inline constexpr int frame_top = border + title_height;
 inline constexpr int frame_bottom = border;
+// Resizing also grabs this far outside the drawn border: 4px is a hard
+// target, especially over RDP.
+inline constexpr int grab_margin = 6;
 
 // Which title-bar controls a frame has.
 struct FrameButtons {
@@ -58,6 +61,7 @@ void paint_frame(cairo_t* cr, int w, int h, std::string_view title, bool active,
     FrameButtons buttons, const Color* client = nullptr);
 
 // Hit-tests a point in frame-local coordinates (0,0 = outer top-left).
+// Resizable frames also answer up to grab_margin outside the frame.
 FrameHit hit_test_frame(int w, int h, double x, double y, FrameButtons buttons, bool resizable);
 
 // An icon caption: centred on cx, wrapped to `width`, at most two lines.

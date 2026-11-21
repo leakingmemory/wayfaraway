@@ -360,12 +360,22 @@ void Server::update_cursor_image(const Hit& hit)
     if (hit.kind == Hit::Kind::View) {
         const retro::FrameHit frame = hit.view->frame_hit(m_cursor->x, m_cursor->y);
         if (frame.part == retro::FramePart::Edge) {
+            // CSS cursor names, with the legacy X11 name for older themes.
+            struct Names {
+                const char* css;
+                const char* x11;
+            };
             const bool top = frame.edges & WLR_EDGE_TOP, bottom = frame.edges & WLR_EDGE_BOTTOM;
             const bool left = frame.edges & WLR_EDGE_LEFT, right = frame.edges & WLR_EDGE_RIGHT;
-            image = top    ? (left ? "nw-resize" : right ? "ne-resize" : "n-resize")
-                : bottom ? (left ? "sw-resize" : right ? "se-resize" : "s-resize")
-                : left   ? "w-resize"
-                         : "e-resize";
+            const Names names = top ? (left ? Names{ "nw-resize", "top_left_corner" }
+                                          : right ? Names{ "ne-resize", "top_right_corner" }
+                                                  : Names{ "n-resize", "top_side" })
+                : bottom ? (left ? Names{ "sw-resize", "bottom_left_corner" }
+                                 : right ? Names{ "se-resize", "bottom_right_corner" }
+                                         : Names{ "s-resize", "bottom_side" })
+                : left ? Names{ "w-resize", "left_side" }
+                       : Names{ "e-resize", "right_side" };
+            image = wlr_xcursor_manager_get_xcursor(m_cursor_manager, names.css, 1) ? names.css : names.x11;
         }
     }
     if (image != m_cursor_image) {

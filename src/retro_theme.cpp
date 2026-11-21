@@ -206,7 +206,8 @@ void paint_frame(cairo_t* cr, int w, int h, std::string_view title, bool active,
 
 FrameHit hit_test_frame(int w, int h, double x, double y, FrameButtons buttons, bool resizable)
 {
-    if (x < 0 || y < 0 || x >= w || y >= h)
+    const int outside = resizable ? grab_margin : 0;
+    if (x < -outside || y < -outside || x >= w + outside || y >= h + outside)
         return {};
 
     const bool on_border = x < border || x >= w - border || y < border || y >= h - border;
