@@ -25,7 +25,8 @@ on a lock screen.
   can leak or race it. The password of the user running the compositor is checked
   through PAM on a worker thread, so the event loop never blocks. Caps Lock and
   Num Lock follow the client's state on connect and whenever its window regains
-  focus. The lock screen warns when Caps Lock is on.
+  focus, and changes on the desktop are mirrored back to the client's keyboard
+  LEDs. The lock screen warns when Caps Lock is on.
 - **Persistence.** The compositor doesn't exit when an RDP client disconnects.
   It locks, and applications keep running. The next connection, from any client,
   lands on the lock screen. A new connection while one is active takes over the

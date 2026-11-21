@@ -56,6 +56,8 @@ public:
     void inject_key(std::uint32_t evdev_keycode, bool pressed);
     // Sets Caps/Num Lock to the client's toggle state (RDP synchronize event).
     void sync_lock_keys(bool caps_lock, bool num_lock);
+    // Called with RDP KBD_SYNC_* flags whenever the keyboard LEDs change.
+    std::function<void(std::uint32_t led_flags)> on_keyboard_leds;
     void inject_pointer_motion(double x, double y);
     void inject_pointer_button(std::uint32_t button, bool pressed);
     void inject_pointer_axis(wl_pointer_axis axis, double value, int value120);
@@ -85,6 +87,7 @@ private:
     void setup_keyboard();
     void on_key(const wlr_keyboard_key_event& event);
     void on_modifiers();
+    static void on_led_update(wlr_keyboard* keyboard, std::uint32_t leds);
     bool handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers);
     void on_unlocked();
 

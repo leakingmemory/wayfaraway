@@ -11,11 +11,6 @@ namespace wfa {
 
 namespace {
 
-constexpr wlr_keyboard_impl keyboard_impl = {
-    .name = "rdp-keyboard",
-    .led_update = nullptr,
-};
-
 std::uint32_t now_msec()
 {
     using namespace std::chrono;
@@ -31,7 +26,13 @@ void Server::setup_keyboard()
 {
     // The headless backend has no input devices; RDP input is fed into this
     // virtual keyboard so xkb state, modifiers and the seat behave normally.
+    static constexpr wlr_keyboard_impl keyboard_impl = {
+        .name = "rdp-keyboard",
+        .led_update = &Server::on_led_update,
+    };
     wlr_keyboard_init(&m_keyboard, &keyboard_impl, "rdp-keyboard");
+    // Set before the keymap, which already reports LEDs.
+    m_keyboard.data = this;
 
     xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     // nullptr names → honours XKB_DEFAULT_LAYOUT etc. from the environment.
@@ -58,6 +59,25 @@ void Server::on_modifiers()
         m_lock_screen->set_caps_lock(caps_lock);
     if (!locked())
         wlr_seat_keyboard_notify_modifiers(m_seat, &m_keyboard.modifiers);
+}
+
+void Server::on_led_update(wlr_keyboard* keyboard, std::uint32_t leds)
+{
+    auto* self = static_cast<Server*>(keyboard->data);
+    if (!self || !self->on_keyboard_leds)
+        return;
+
+    // WLR_LED_* to RDP's KBD_SYNC_* bits (scroll 1, num 2, caps 4, kana 8).
+    std::uint32_t flags = 0;
+    if (leds & WLR_LED_SCROLL_LOCK)
+        flags |= 0x1;
+    if (leds & WLR_LED_NUM_LOCK)
+        flags |= 0x2;
+    if (leds & WLR_LED_CAPS_LOCK)
+        flags |= 0x4;
+    if (leds & WLR_LED_KANA)
+        flags |= 0x8;
+    self->on_keyboard_leds(flags);
 }
 
 void Server::sync_lock_keys(bool caps_lock, bool num_lock)

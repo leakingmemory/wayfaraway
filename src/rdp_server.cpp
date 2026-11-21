@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include <linux/input-event-codes.h>
@@ -160,6 +161,23 @@ public:
         update_microphone();
     }
 
+    // Mirrors our Caps/Num Lock state onto the client's keyboard LEDs.
+    void set_keyboard_leds(UINT32 server_flags)
+    {
+        // Until the client has reported its own state, it wins: pushing ours
+        // first would overwrite it. Only the locks we actually sync are ours;
+        // Scroll Lock and Kana stay as the client reported them, since on
+        // Windows clients this PDU really toggles the local keyboard.
+        if (!m_active || !m_client_leds)
+            return;
+        constexpr UINT32 ours = KBD_SYNC_CAPS_LOCK | KBD_SYNC_NUM_LOCK;
+        const UINT32 wanted = (*m_client_leds & ~ours) | (server_flags & ours);
+        if (wanted == *m_client_leds)
+            return;
+        m_client_leds = wanted;
+        (void)update()->SetKeyboardIndicators(m_client->context, static_cast<UINT16>(wanted));
+    }
+
     void set_microphone_demand(bool wanted)
     {
         m_microphone_demand = wanted;
@@ -225,6 +243,8 @@ private:
     std::unique_ptr<RdpAudio> m_audio;
     std::unique_ptr<RdpMicrophone> m_microphone;
     bool m_microphone_demand = false;
+    // Lock-key state the client is known to have (KBD_SYNC_* flags).
+    std::optional<UINT32> m_client_leds;
 
     Codec m_codec = Codec::RemoteFx;
     RFX_CONTEXT* m_rfx = nullptr;
@@ -721,7 +741,10 @@ BOOL RdpPeer::on_synchronize(rdpInput* input, UINT32 flags)
 {
     // Sent on connect and whenever the client window regains focus, so lock
     // keys toggled elsewhere on the client do not leave us out of step.
-    from(input->context)->compositor().sync_lock_keys(flags & KBD_SYNC_CAPS_LOCK, flags & KBD_SYNC_NUM_LOCK);
+    RdpPeer* self = from(input->context);
+    // Recorded first, so the LED update our own change triggers is no echo.
+    self->m_client_leds = flags & (KBD_SYNC_SCROLL_LOCK | KBD_SYNC_NUM_LOCK | KBD_SYNC_CAPS_LOCK | KBD_SYNC_KANA_LOCK);
+    self->compositor().sync_lock_keys(flags & KBD_SYNC_CAPS_LOCK, flags & KBD_SYNC_NUM_LOCK);
     return TRUE;
 }
 
@@ -829,6 +852,7 @@ RdpServer::RdpServer(Server& server)
 RdpServer::~RdpServer()
 {
     m_server.on_lock_changed = nullptr;
+    m_server.on_keyboard_leds = nullptr;
     m_peer.reset();
 #ifdef WAYFARAWAY_HAVE_PIPEWIRE
     m_microphone.reset();
@@ -860,6 +884,10 @@ bool RdpServer::listen()
 
     // Required before any WTS virtual channel call.
     WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());
+    m_server.on_keyboard_leds = [this](std::uint32_t flags) {
+        if (m_peer)
+            m_peer->set_keyboard_leds(flags);
+    };
     m_server.on_lock_changed = [this](bool locked) {
 #ifdef WAYFARAWAY_HAVE_PIPEWIRE
         // Do not play out microphone audio captured before the lock.
