@@ -96,9 +96,9 @@ cmake --build build
    Compare it with what your client shows the first time it asks whether to
    trust the server. To use your own certificate, pass `--cert`/`--key` or put
    the files in place. To get a fresh one, delete both files.
-2. **PAM service.** Install `data/wayfaraway.pam` as `/etc/pam.d/wayfaraway`
-   (`cmake --install` does this). It includes `system-local-login`; adjust that
-   for your distribution. Without the file, PAM falls back to the `other`
+2. **PAM service.** `cmake --install` installs `/etc/pam.d/wayfaraway`. It
+   includes `system-local-login`, or `system` on FreeBSD; pick another stack
+   with `-DWAYFARAWAY_PAM_INCLUDE=...` (for example `system-auth`). Without the file, PAM falls back to the `other`
    service, which usually denies everything. It goes to `/etc/pam.d` whatever
    the install prefix, because that is the only place PAM looks. Override it
    with `-DWAYFARAWAY_PAM_DIR=...` if your distribution uses something else,
@@ -121,6 +121,20 @@ cmake --build build
    Without lingering, the service only runs while you have a local login or
    SSH session. To pass options, override `ExecStart` in the drop-in: an
    empty `ExecStart=` line, then the new one.
+
+   On FreeBSD, `cmake --install` installs an rc.d script instead, as
+   `${PREFIX}/etc/rc.d/wayfaraway` (`-DWAYFARAWAY_RC=OFF` turns it off,
+   `-DWAYFARAWAY_RC_DIR=...` moves it). It runs the compositor as the given
+   user under daemon(8), which restarts it if it crashes, and creates
+   `/var/run/user/<uid>` for the Wayland socket:
+   ```sh
+   sysrc wayfaraway_enable=YES
+   sysrc wayfaraway_user=alice
+   sysrc wayfaraway_flags="--startup 'foot'"   # optional
+   sysrc wayfaraway_env="LANG=en_US.UTF-8"     # optional
+   service wayfaraway start
+   ```
+   Output goes to `/var/log/wayfaraway.log` (`wayfaraway_log`).
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh

@@ -96,6 +96,15 @@ target_link_libraries(wayfaraway PRIVATE
 # absolute path rather than one under CMAKE_INSTALL_SYSCONFDIR (which would
 # give /usr/etc or /usr/local/etc). DESTDIR is still honoured for packaging.
 set(WAYFARAWAY_PAM_DIR "/etc/pam.d" CACHE PATH "Directory to install the PAM service file into")
+# The system stack the service file includes for auth and account.
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(WAYFARAWAY_PAM_INCLUDE_DEFAULT "system")
+else()
+    set(WAYFARAWAY_PAM_INCLUDE_DEFAULT "system-local-login")
+endif()
+set(WAYFARAWAY_PAM_INCLUDE "${WAYFARAWAY_PAM_INCLUDE_DEFAULT}"
+    CACHE STRING "PAM service that wayfaraway's auth and account stacks include")
+configure_file(data/wayfaraway.pam.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.pam @ONLY)
 
 # A systemd user unit, so the desktop can run as a per-user service:
 #   systemctl --user enable --now wayfaraway
@@ -124,11 +133,32 @@ if(WAYFARAWAY_SYSTEMD)
     configure_file(data/wayfaraway.service.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service @ONLY)
 endif()
 
+# An rc.d script, so the desktop can run as a service on FreeBSD:
+#   sysrc wayfaraway_enable=YES wayfaraway_user=alice
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(WAYFARAWAY_RC_DEFAULT ON)
+else()
+    set(WAYFARAWAY_RC_DEFAULT OFF)
+endif()
+option(WAYFARAWAY_RC "Install a FreeBSD rc.d script" ${WAYFARAWAY_RC_DEFAULT})
+
+if(WAYFARAWAY_RC)
+    # Local services live in ${PREFIX}/etc/rc.d, so /usr/local/etc/rc.d.
+    set(WAYFARAWAY_RC_DIR "${CMAKE_INSTALL_FULL_SYSCONFDIR}/rc.d"
+        CACHE PATH "Directory to install the rc.d script into")
+    configure_file(data/wayfaraway.rc.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.rc @ONLY)
+endif()
+
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES data/wayfaraway.pam
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.pam
     DESTINATION ${WAYFARAWAY_PAM_DIR}
     RENAME wayfaraway)
 if(WAYFARAWAY_SYSTEMD)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service
         DESTINATION ${WAYFARAWAY_SYSTEMD_USER_UNIT_DIR})
+endif()
+if(WAYFARAWAY_RC)
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.rc
+        DESTINATION ${WAYFARAWAY_RC_DIR}
+        RENAME wayfaraway)
 endif()

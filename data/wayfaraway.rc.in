@@ -1,0 +1,80 @@
+#!/bin/sh
+
+# PROVIDE: wayfaraway
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# wayfaraway: a headless Wayland desktop served over RDP.
+#
+# The desktop belongs to one user, who unlocks it with their password.
+# To start it at boot:
+#
+#   sysrc wayfaraway_enable=YES
+#   sysrc wayfaraway_user=alice
+#
+# Optional:
+#
+#   wayfaraway_flags  options for wayfaraway, quoted as on a command line,
+#                     e.g. "--address 0.0.0.0 --startup 'foot'"
+#   wayfaraway_env    extra environment, e.g. "LANG=en_US.UTF-8"
+#   wayfaraway_log    log file (default: /var/log/wayfaraway.log)
+
+. /etc/rc.subr
+
+name="wayfaraway"
+desc="Headless Wayland desktop served over RDP"
+rcvar="wayfaraway_enable"
+
+load_rc_config $name
+
+: ${wayfaraway_enable:="NO"}
+: ${wayfaraway_user:=""}
+: ${wayfaraway_flags:=""}
+: ${wayfaraway_env:=""}
+: ${wayfaraway_log:="/var/log/${name}.log"}
+
+# daemon(8) supervises the compositor, restarts it if it crashes and drops
+# to the user, so the pidfile is daemon's own.
+command="@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway"
+procname="/usr/sbin/daemon"
+pidfile="/var/run/${name}.pid"
+# A start command of our own, because the default one would su to
+# ${name}_user and pass ${name}_flags to daemon rather than to wayfaraway.
+start_cmd="${name}_start"
+
+wayfaraway_start()
+{
+	local uid group home runtime
+
+	if [ -n "${rc_pid}" ]; then
+		echo "${name} already running? (pid=${rc_pid})."
+		return 1
+	fi
+	if [ -z "${wayfaraway_user}" ]; then
+		err 1 "set wayfaraway_user to the user who owns the desktop"
+	fi
+	uid=$(id -u "${wayfaraway_user}") || err 1 "unknown user ${wayfaraway_user}"
+	group=$(id -gn "${wayfaraway_user}")
+	home=$(getent passwd "${wayfaraway_user}" | cut -d: -f6)
+
+	# Without a login manager to provide it, the Wayland socket's runtime
+	# directory is made here: owned by the user and private to them.
+	runtime="/var/run/user/${uid}"
+	install -d -m 0755 /var/run/user
+	install -d -m 0700 -o "${wayfaraway_user}" -g "${group}" "${runtime}"
+
+	touch "${wayfaraway_log}"
+	chown "${wayfaraway_user}:${group}" "${wayfaraway_log}"
+	chmod 0640 "${wayfaraway_log}"
+
+	check_startmsgs && echo "Starting ${name}."
+	# eval, so quoting in wayfaraway_flags and wayfaraway_env is honoured.
+	eval "/usr/sbin/daemon -f -r -P \"\${pidfile}\" -o \"\${wayfaraway_log}\" \
+		-u \"\${wayfaraway_user}\" \
+		/usr/bin/env HOME=\"\${home}\" USER=\"\${wayfaraway_user}\" \
+		LOGNAME=\"\${wayfaraway_user}\" XDG_RUNTIME_DIR=\"\${runtime}\" \
+		PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin \
+		${wayfaraway_env} \"\${command}\" ${wayfaraway_flags}"
+}
+
+run_rc_command "$1"
