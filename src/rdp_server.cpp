@@ -327,9 +327,14 @@ bool RdpPeer::init()
         && freerdp_settings_set_pointer_len(s, FreeRDP_RdpServerRsaKey, key, 1)
         // Authentication happens on our own lock screen, so the transport
         // only needs TLS; NLA would require a separate credential store.
+        // Every NLA-like protocol must be off: FreeRDP checks RDSTLS and
+        // HYBRID_EX (ExtSecurity) before plain NLA, and clients ask for them.
         && freerdp_settings_set_bool(s, FreeRDP_RdpSecurity, FALSE)
         && freerdp_settings_set_bool(s, FreeRDP_TlsSecurity, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_NlaSecurity, FALSE)
+        && freerdp_settings_set_bool(s, FreeRDP_ExtSecurity, FALSE)
+        && freerdp_settings_set_bool(s, FreeRDP_RdstlsSecurity, FALSE)
+        && freerdp_settings_set_bool(s, FreeRDP_AadSecurity, FALSE)
         && freerdp_settings_set_uint32(s, FreeRDP_ColorDepth, 32)
         && freerdp_settings_set_bool(s, FreeRDP_RemoteFxCodec, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_NSCodec, TRUE)
@@ -346,8 +351,7 @@ bool RdpPeer::init()
         && freerdp_settings_set_bool(s, FreeRDP_UseMultimon, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_SupportMonitorLayoutPdu, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, TRUE)
-        && freerdp_settings_set_uint32(s, FreeRDP_MultifragMaxRequestSize, 0xFFFFFF)
-        && freerdp_settings_set_uint32(s, FreeRDP_FrameAcknowledge, default_frames_in_flight);
+        && freerdp_settings_set_uint32(s, FreeRDP_MultifragMaxRequestSize, 0xFFFFFF);
     if (!ok) {
         wlr_log(WLR_ERROR, "RDP: failed to configure peer settings");
         return false;
@@ -369,6 +373,11 @@ bool RdpPeer::init()
 
     if (!m_client->Initialize(m_client)) {
         wlr_log(WLR_ERROR, "RDP: peer initialisation failed");
+        return false;
+    }
+    // Initialize() resets FrameAcknowledge to 0, so it must be set after.
+    if (!freerdp_settings_set_uint32(s, FreeRDP_FrameAcknowledge, default_frames_in_flight)) {
+        wlr_log(WLR_ERROR, "RDP: failed to enable frame acknowledgement");
         return false;
     }
 
