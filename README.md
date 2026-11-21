@@ -154,6 +154,20 @@ cmake --build build
    which elogind mounts over at login and removes at logout. To share the
    user's PipeWire there, set `WAYFARAWAY_RUNTIME_DIR=/run/user/<uid>` and
    run `loginctl enable-linger alice`.
+
+   On Void Linux and other runit systems with `/etc/sv`, `cmake --install`
+   installs the service `/etc/sv/wayfaraway`. This happens by default when
+   `runsvdir` is found; `-DWAYFARAWAY_RUNIT=ON/OFF` overrides that. Its `conf`
+   is only installed if it doesn't exist yet. Copy the service under a name
+   ending in the user's name, then enable it:
+   ```sh
+   cp -a /etc/sv/wayfaraway /etc/sv/wayfaraway-alice
+   ln -s /etc/sv/wayfaraway-alice /var/service/
+   ```
+   runit restarts it if it exits. Options go in
+   `/etc/sv/wayfaraway-alice/conf` (`WAYFARAWAY_OPTS`), and svlogd keeps the
+   log in `/var/log/wayfaraway-alice/`. As with OpenRC, the socket lives in
+   `/run/wayfaraway/alice` unless `WAYFARAWAY_RUNTIME_DIR` says otherwise.
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh

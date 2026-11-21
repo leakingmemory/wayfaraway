@@ -1,0 +1,6 @@
+#!/bin/sh
+# Logs to /var/log/<service name>, rotated by svlogd.
+service="${PWD%/log}"
+service="${service##*/}"
+mkdir -p "/var/log/${service}"
+exec svlogd -tt "/var/log/${service}"

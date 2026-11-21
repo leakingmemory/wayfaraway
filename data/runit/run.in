@@ -1,0 +1,40 @@
+#!/bin/sh
+# wayfaraway: a headless Wayland desktop served over RDP, as a runit service.
+#
+# The desktop belongs to one user, who unlocks it with their password. Name a
+# copy of this service after the user, or set WAYFARAWAY_USER in ./conf:
+#
+#   cp -a /etc/sv/wayfaraway /etc/sv/wayfaraway-alice
+#   ln -s /etc/sv/wayfaraway-alice /var/service/
+exec 2>&1
+
+[ -r ./conf ] && . ./conf
+
+service="${PWD##*/}"
+case "${service}" in
+	wayfaraway-?*) : "${WAYFARAWAY_USER:=${service#wayfaraway-}}" ;;
+esac
+if [ -z "${WAYFARAWAY_USER}" ]; then
+	echo "Set WAYFARAWAY_USER in ${PWD}/conf, or name the service wayfaraway-<user>"
+	# runsv restarts us at once; don't flood the log.
+	exec sleep 60
+fi
+
+# Primary group first, then the supplementary ones, for chpst.
+groups=$(id -Gn "${WAYFARAWAY_USER}") || exec sleep 60
+home=$(getent passwd "${WAYFARAWAY_USER}" | cut -d: -f6)
+
+# The Wayland socket's runtime directory: owned by the user and private. Not
+# /run/user/<uid> by default, which elogind and turnstile manage per login.
+if [ -z "${WAYFARAWAY_RUNTIME_DIR}" ]; then
+	install -d -m 0755 -o root -g root /run/wayfaraway
+	WAYFARAWAY_RUNTIME_DIR="/run/wayfaraway/${WAYFARAWAY_USER}"
+fi
+install -d -m 0700 -o "${WAYFARAWAY_USER}" -g "${groups%% *}" "${WAYFARAWAY_RUNTIME_DIR}"
+
+cd "${home}" || cd /
+# eval, so quoting in WAYFARAWAY_OPTS is honoured.
+eval "exec chpst -u \"\${WAYFARAWAY_USER}:$(echo "${groups}" | tr ' ' ':')\" \
+	env HOME=\"\${home}\" USER=\"\${WAYFARAWAY_USER}\" LOGNAME=\"\${WAYFARAWAY_USER}\" \
+	XDG_RUNTIME_DIR=\"\${WAYFARAWAY_RUNTIME_DIR}\" \
+	@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway ${WAYFARAWAY_OPTS}"

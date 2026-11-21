@@ -167,6 +167,31 @@ if(WAYFARAWAY_OPENRC)
     configure_file(data/wayfaraway.openrc.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.openrc @ONLY)
 endif()
 
+# A runit service, for Void Linux:
+#   ln -s /etc/sv/wayfaraway /var/service/
+set(WAYFARAWAY_RUNIT_DEFAULT OFF)
+foreach(dir /sbin /usr/sbin /usr/bin)
+    if(EXISTS ${dir}/runsvdir AND IS_DIRECTORY /etc/sv)
+        set(WAYFARAWAY_RUNIT_DEFAULT ON)
+    endif()
+endforeach()
+option(WAYFARAWAY_RUNIT "Install a runit service" ${WAYFARAWAY_RUNIT_DEFAULT})
+
+if(WAYFARAWAY_RUNIT)
+    set(WAYFARAWAY_RUNIT_DIR "/etc/sv" CACHE PATH "Directory to install the runit service directory into")
+    configure_file(data/runit/run.in ${CMAKE_CURRENT_BINARY_DIR}/runit/run @ONLY)
+endif()
+
+# Installs a configuration file only if there is none yet: once installed, it
+# is the admin's.
+function(wayfaraway_install_config source destination name)
+    install(CODE "
+        if(NOT EXISTS \"\$ENV{DESTDIR}${destination}/${name}\")
+            file(INSTALL \"${source}\" DESTINATION \"${destination}\" RENAME \"${name}\")
+        endif()
+    ")
+endfunction()
+
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.pam
     DESTINATION ${WAYFARAWAY_PAM_DIR}
@@ -184,12 +209,14 @@ if(WAYFARAWAY_OPENRC)
     install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.openrc
         DESTINATION ${WAYFARAWAY_OPENRC_INITD_DIR}
         RENAME wayfaraway)
-    # The configuration is the admin's once installed: never overwrite it.
-    install(CODE "
-        if(NOT EXISTS \"\$ENV{DESTDIR}${WAYFARAWAY_OPENRC_CONFD_DIR}/wayfaraway\")
-            file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/data/wayfaraway.confd\"
-                DESTINATION \"${WAYFARAWAY_OPENRC_CONFD_DIR}\"
-                RENAME wayfaraway)
-        endif()
-    ")
+    wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/wayfaraway.confd
+        ${WAYFARAWAY_OPENRC_CONFD_DIR} wayfaraway)
+endif()
+if(WAYFARAWAY_RUNIT)
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/runit/run
+        DESTINATION ${WAYFARAWAY_RUNIT_DIR}/wayfaraway)
+    install(PROGRAMS data/runit/log/run
+        DESTINATION ${WAYFARAWAY_RUNIT_DIR}/wayfaraway/log)
+    wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/runit/conf
+        ${WAYFARAWAY_RUNIT_DIR}/wayfaraway conf)
 endif()
