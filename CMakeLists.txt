@@ -84,9 +84,18 @@ target_link_libraries(wayfaraway PRIVATE
     OpenSSL::Crypto
 )
 
+# PAM only reads /etc/pam.d, whatever the install prefix, so this is an
+# absolute path rather than one under CMAKE_INSTALL_SYSCONFDIR (which would
+# give /usr/etc or /usr/local/etc). DESTDIR is still honoured for packaging.
+set(WAYFARAWAY_PAM_DIR "/etc/pam.d" CACHE PATH "Directory to install the PAM service file into")
+set(WAYFARAWAY_SYSTEMD_USER_UNIT_DIR "${CMAKE_INSTALL_PREFIX}/lib/systemd/user"
+    CACHE PATH "Directory to install the systemd user unit into")
+
+configure_file(data/wayfaraway.service.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service @ONLY)
+
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/wayfaraway.pam
-    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d
+    DESTINATION ${WAYFARAWAY_PAM_DIR}
     RENAME wayfaraway)
-install(FILES data/wayfaraway.service
-    DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/user)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service
+    DESTINATION ${WAYFARAWAY_SYSTEMD_USER_UNIT_DIR})

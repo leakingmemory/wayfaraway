@@ -87,7 +87,10 @@ cmake --build build
 2. **PAM service.** Install `data/wayfaraway.pam` as `/etc/pam.d/wayfaraway`
    (`cmake --install` does this). It includes `system-local-login`; adjust that
    for your distribution. Without the file, PAM falls back to the `other`
-   service, which usually denies everything.
+   service, which usually denies everything. It goes to `/etc/pam.d` whatever
+   the install prefix, because that is the only place PAM looks. Override it
+   with `-DWAYFARAWAY_PAM_DIR=...` if your distribution uses something else,
+   such as `/usr/lib/pam.d`.
 3. **Run it.** Start it as the user who owns the desktop:
    ```sh
    ./build/wayfaraway --startup 'foot'

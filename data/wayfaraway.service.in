@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/wayfaraway
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway
 Restart=on-failure
 
 [Install]
