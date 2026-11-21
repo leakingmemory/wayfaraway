@@ -868,11 +868,14 @@ BOOL RdpPeer::on_keyboard(rdpInput* input, UINT16 flags, UINT8 code)
     DWORD keycode = GetKeycodeFromVirtualKeyCode(vk, WINPR_KEYCODE_TYPE_EVDEV);
     if (keycode == 0)
         keycode = GetKeycodeFromVirtualKeyCode(vk & 0xFF, WINPR_KEYCODE_TYPE_EVDEV);
-    // WinPR returns X11-style evdev codes, offset by 8.
-    if (keycode < 8)
+    // WinPR 3's EVDEV type gives Linux input codes (KEY_*), which is what
+    // wlroots expects; its XKB type would be these plus 8. 0 means unmapped.
+    if (keycode == 0) {
+        wlr_log(WLR_DEBUG, "RDP: no keycode for scancode 0x%03X (vk 0x%04X)", scancode, vk);
         return TRUE;
+    }
 
-    self->compositor().inject_key(keycode - 8, !(flags & KBD_FLAGS_RELEASE));
+    self->compositor().inject_key(keycode, !(flags & KBD_FLAGS_RELEASE));
     return TRUE;
 }
 
