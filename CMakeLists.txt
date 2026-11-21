@@ -182,6 +182,22 @@ if(WAYFARAWAY_RUNIT)
     configure_file(data/runit/run.in ${CMAKE_CURRENT_BINARY_DIR}/runit/run @ONLY)
 endif()
 
+# s6-rc service definitions, as Artix lays them out:
+#   s6-service add default wayfaraway && s6-db-reload
+set(WAYFARAWAY_S6_DEFAULT OFF)
+foreach(dir /sbin /usr/sbin /usr/bin /bin)
+    if(EXISTS ${dir}/s6-rc-compile)
+        set(WAYFARAWAY_S6_DEFAULT ON)
+    endif()
+endforeach()
+option(WAYFARAWAY_S6 "Install s6-rc service definitions" ${WAYFARAWAY_S6_DEFAULT})
+
+if(WAYFARAWAY_S6)
+    set(WAYFARAWAY_S6_SV_DIR "/etc/s6/sv" CACHE PATH "Directory to install the s6-rc service definitions into")
+    set(WAYFARAWAY_S6_CONF_DIR "/etc/s6/config" CACHE PATH "Directory to install the s6 service configuration into")
+    configure_file(data/s6/wayfaraway-srv/run.in ${CMAKE_CURRENT_BINARY_DIR}/s6/run @ONLY)
+endif()
+
 # Installs a configuration file only if there is none yet: once installed, it
 # is the admin's.
 function(wayfaraway_install_config source destination name)
@@ -219,4 +235,17 @@ if(WAYFARAWAY_RUNIT)
         DESTINATION ${WAYFARAWAY_RUNIT_DIR}/wayfaraway/log)
     wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/runit/conf
         ${WAYFARAWAY_RUNIT_DIR}/wayfaraway conf)
+endif()
+if(WAYFARAWAY_S6)
+    install(FILES data/s6/wayfaraway-srv/type data/s6/wayfaraway-srv/producer-for
+        DESTINATION ${WAYFARAWAY_S6_SV_DIR}/wayfaraway-srv)
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/s6/run
+        DESTINATION ${WAYFARAWAY_S6_SV_DIR}/wayfaraway-srv)
+    install(FILES data/s6/wayfaraway-log/type data/s6/wayfaraway-log/consumer-for
+        data/s6/wayfaraway-log/pipeline-name
+        DESTINATION ${WAYFARAWAY_S6_SV_DIR}/wayfaraway-log)
+    install(PROGRAMS data/s6/wayfaraway-log/run
+        DESTINATION ${WAYFARAWAY_S6_SV_DIR}/wayfaraway-log)
+    wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/s6/wayfaraway.conf
+        ${WAYFARAWAY_S6_CONF_DIR} wayfaraway.conf)
 endif()

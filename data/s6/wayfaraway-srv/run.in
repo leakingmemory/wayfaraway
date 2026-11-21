@@ -1,0 +1,34 @@
+#!/bin/sh
+# wayfaraway: a headless Wayland desktop served over RDP, as an s6 longrun.
+# Settings are read from @WAYFARAWAY_S6_CONF_DIR@/wayfaraway.conf on every
+# start, so changing them needs no recompile, only a restart.
+exec 2>&1
+
+conf="@WAYFARAWAY_S6_CONF_DIR@/wayfaraway.conf"
+[ -r "${conf}" ] && . "${conf}"
+
+if [ -z "${WAYFARAWAY_USER}" ]; then
+	echo "Set WAYFARAWAY_USER in ${conf}"
+	# s6-supervise restarts us at once; don't flood the log.
+	exec sleep 60
+fi
+
+uid=$(id -u "${WAYFARAWAY_USER}") || exec sleep 60
+gid=$(id -g "${WAYFARAWAY_USER}")
+gids=$(id -G "${WAYFARAWAY_USER}" | tr ' ' ',')
+home=$(getent passwd "${WAYFARAWAY_USER}" | cut -d: -f6)
+
+# The Wayland socket's runtime directory: owned by the user and private. Not
+# /run/user/<uid> by default, which elogind and turnstile manage per login.
+if [ -z "${WAYFARAWAY_RUNTIME_DIR}" ]; then
+	install -d -m 0755 -o root -g root /run/wayfaraway
+	WAYFARAWAY_RUNTIME_DIR="/run/wayfaraway/${WAYFARAWAY_USER}"
+fi
+install -d -m 0700 -o "${uid}" -g "${gid}" "${WAYFARAWAY_RUNTIME_DIR}"
+
+cd "${home}" || cd /
+# eval, so quoting in WAYFARAWAY_OPTS is honoured.
+eval "exec s6-applyuidgid -u \"\${uid}\" -g \"\${gid}\" -G \"\${gids}\" \
+	env HOME=\"\${home}\" USER=\"\${WAYFARAWAY_USER}\" LOGNAME=\"\${WAYFARAWAY_USER}\" \
+	XDG_RUNTIME_DIR=\"\${WAYFARAWAY_RUNTIME_DIR}\" \
+	@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway ${WAYFARAWAY_OPTS}"

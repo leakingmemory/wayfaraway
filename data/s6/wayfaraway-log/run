@@ -1,0 +1,4 @@
+#!/bin/sh
+# Logs to /var/log/wayfaraway, with timestamps, keeping ten 1 MB archives.
+mkdir -p /var/log/wayfaraway
+exec s6-log -b -- n10 s1000000 T /var/log/wayfaraway

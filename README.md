@@ -168,6 +168,23 @@ cmake --build build
    `/etc/sv/wayfaraway-alice/conf` (`WAYFARAWAY_OPTS`), and svlogd keeps the
    log in `/var/log/wayfaraway-alice/`. As with OpenRC, the socket lives in
    `/run/wayfaraway/alice` unless `WAYFARAWAY_RUNTIME_DIR` says otherwise.
+
+   On s6-rc systems such as Artix, `cmake --install` installs the source
+   definitions `wayfaraway-srv` and `wayfaraway-log` into `/etc/s6/sv`. They
+   form the pipeline bundle `wayfaraway`. This happens by default when
+   `s6-rc-compile` is found; `-DWAYFARAWAY_S6=ON/OFF` overrides that.
+   Settings go in `/etc/s6/config/wayfaraway.conf`, which is only installed
+   if it doesn't exist yet and is read on every start:
+   ```sh
+   # set WAYFARAWAY_USER (and WAYFARAWAY_OPTS) in /etc/s6/config/wayfaraway.conf
+   s6-service add default wayfaraway
+   s6-db-reload
+   s6-rc -u change wayfaraway
+   ```
+   Without Artix's helpers, add the bundle to your source tree, then run
+   `s6-rc-compile` and `s6-rc-update`. s6 restarts the desktop if it exits,
+   and s6-log keeps the log in `/var/log/wayfaraway/`. The socket lives in
+   `/run/wayfaraway/<user>` unless `WAYFARAWAY_RUNTIME_DIR` says otherwise.
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh
