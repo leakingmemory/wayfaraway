@@ -8,6 +8,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "desktop_icons.hpp"
+#include "program_manager.hpp"
 #include "rdp_server.hpp"
 #include "view.hpp"
 
@@ -50,9 +52,17 @@ Server::Server(Config config)
     m_scene = wlr_scene_create();
     m_scene_layout = wlr_scene_attach_output_layout(m_scene, m_output_layout);
 
-    static constexpr float background_color[4] = { 0.10f, 0.11f, 0.15f, 1.0f };
+    static constexpr float background_color[4] = { static_cast<float>(retro::desktop.r),
+        static_cast<float>(retro::desktop.g), static_cast<float>(retro::desktop.b), 1.0f };
     m_background = wlr_scene_rect_create(&m_scene->tree, 0, 0, background_color);
     m_desktop_tree = wlr_scene_tree_create(&m_scene->tree);
+    // First children of the desktop tree, so windows always stack above the
+    // minimized icons; the launcher is raised like any window when focused.
+    m_desktop_icons = std::make_unique<DesktopIcons>(m_desktop_tree);
+    m_programs = std::make_unique<ProgramManager>(m_desktop_tree, m_icon_loader,
+        [this](const DesktopEntry& entry) { launch(entry); });
+    m_programs->on_minimize = [this] { minimize_programs(); };
+    m_programs->on_focus = [this] { focus_programs(); };
     m_lock_tree = wlr_scene_tree_create(&m_scene->tree);
     // Fail closed: nothing on the desktop is visible until the first unlock.
     wlr_scene_node_set_enabled(&m_desktop_tree->node, false);
@@ -63,6 +73,18 @@ Server::Server(Config config)
     });
     m_new_popup.connect(&m_xdg_shell->events.new_popup, [](void* data) {
         new Popup(static_cast<wlr_xdg_popup*>(data));
+    });
+
+    // Server-side decorations: windows get the retro frame.
+    m_decoration_manager = wlr_xdg_decoration_manager_v1_create(m_display);
+    m_new_decoration.connect(&m_decoration_manager->events.new_toplevel_decoration, [this](void* data) {
+        auto* decoration = static_cast<wlr_xdg_toplevel_decoration_v1*>(data);
+        for (auto& view : m_views) {
+            if (view->toplevel() == decoration->toplevel) {
+                view->set_decoration(decoration);
+                return;
+            }
+        }
     });
 
     m_cursor = wlr_cursor_create();
@@ -105,10 +127,14 @@ Server::~Server()
     m_views.clear();
 
     m_lock_screen.reset();
+    m_application_watcher.reset();
+    m_programs.reset();
+    m_desktop_icons.reset();
     m_authenticator.reset();
 
     m_new_toplevel.disconnect();
     m_new_popup.disconnect();
+    m_new_decoration.disconnect();
     m_request_set_cursor.disconnect();
     m_request_set_selection.disconnect();
     m_request_set_primary_selection.disconnect();
@@ -155,6 +181,10 @@ bool Server::start()
         return false;
 
     setenv("WAYLAND_DISPLAY", socket, 1);
+    // Desktop files may be limited to (or hidden from) particular desktops.
+    setenv("XDG_CURRENT_DESKTOP", std::string(desktop_name).c_str(), 1);
+    reload_applications();
+    m_application_watcher = std::make_unique<DesktopEntryWatcher>(m_loop, [this] { reload_applications(); });
     // Clients must never try to talk to whatever display we might have been
     // started from.
     unsetenv("DISPLAY");
@@ -193,9 +223,7 @@ void Server::on_unlocked()
     wlr_scene_node_set_enabled(&m_desktop_tree->node, true);
     if (on_lock_changed)
         on_lock_changed(false);
-    auto it = std::ranges::find_if(m_views, [](const auto& view) { return view->mapped(); });
-    if (it != m_views.end())
-        focus_view(it->get());
+    focus_topmost();
     process_cursor_motion(0);
 }
 
@@ -315,6 +343,8 @@ void Server::layout_changed()
     wlr_log(WLR_INFO, "Desktop is %dx%d", m_desktop.width, m_desktop.height);
 
     wlr_scene_rect_set_size(m_background, m_desktop.width, m_desktop.height);
+    m_programs->place(primary_box());
+    m_desktop_icons->set_area(primary_box());
     m_lock_screen->set_layout(m_desktop.width, m_desktop.height, primary_box());
     if (m_frame_sink)
         m_frame_sink->on_layout(m_desktop.width, m_desktop.height);
@@ -331,11 +361,11 @@ void Server::layout_changed()
     for (auto& view : m_views) {
         if (!view->mapped())
             continue;
-        const wlr_box geometry = view->toplevel()->base->geometry;
-        const wlr_box box{ view->x() + geometry.x, view->y() + geometry.y, geometry.width, geometry.height };
+        const wlr_box box = view->outer_box();
         if (!wlr_output_layout_intersects(m_output_layout, nullptr, &box)) {
-            view->move_to(primary.x + std::max(0, (primary.width - geometry.width) / 2) - geometry.x,
-                primary.y + std::max(0, (primary.height - geometry.height) / 2) - geometry.y);
+            // Moving the outer box moves the surface by the same amount.
+            view->move_to(view->x() + primary.x + std::max(0, (primary.width - box.width) / 2) - box.x,
+                view->y() + primary.y + std::max(0, (primary.height - box.height) / 2) - box.y);
         }
         view->fit_to_output();
     }
@@ -424,12 +454,158 @@ void Server::spawn(const std::string& command) const
     waitpid(child, nullptr, 0);
 }
 
+void Server::spawn(const std::vector<std::string>& argv, const std::string& directory) const
+{
+    if (argv.empty())
+        return;
+    // Built before forking: only async-signal-safe calls in the child.
+    std::vector<char*> args;
+    for (const auto& arg : argv)
+        args.push_back(const_cast<char*>(arg.c_str()));
+    args.push_back(nullptr);
+
+    pid_t child = fork();
+    if (child < 0) {
+        wlr_log_errno(WLR_ERROR, "fork failed");
+        return;
+    }
+    if (child == 0) {
+        setsid();
+        if (fork() == 0) {
+            if (!directory.empty() && chdir(directory.c_str()) != 0) {
+                // Run anyway, from the current directory.
+            }
+            execvp(args[0], args.data());
+            _exit(127);
+        }
+        _exit(0);
+    }
+    waitpid(child, nullptr, 0);
+}
+
+// --- Desktop shell ----------------------------------------------------------
+
+void Server::reload_applications()
+{
+    m_applications = load_desktop_entries();
+    m_programs->set_entries(m_applications);
+}
+
+void Server::launch(const DesktopEntry& entry)
+{
+    const auto argv = entry.argv(m_config.terminal);
+    if (argv.empty()) {
+        wlr_log(WLR_ERROR, "Launcher: cannot parse Exec of %s", entry.id.c_str());
+        return;
+    }
+    wlr_log(WLR_INFO, "Launcher: starting %s", entry.id.c_str());
+    spawn(argv, entry.path);
+}
+
+View* Server::view_for_surface(wlr_surface* surface) const
+{
+    if (!surface)
+        return nullptr;
+    for (const auto& view : m_views) {
+        if (view->surface() == surface)
+            return view.get();
+    }
+    return nullptr;
+}
+
+cairo_surface_t* Server::icon_for_view(const View& view)
+{
+    const DesktopEntry* entry = find_entry_for_app_id(m_applications, view.app_id());
+    return m_icon_loader.get(entry ? entry->icon : view.app_id(), 32);
+}
+
+void Server::minimize_view(View* view)
+{
+    if (view->minimized())
+        return;
+    if (m_grabbed_view == view)
+        reset_cursor_mode();
+    const bool was_focused = m_seat->keyboard_state.focused_surface == view->surface();
+    view->set_minimized(true);
+    view->set_activated(false);
+
+    const std::string label = view->title().empty() ? view->app_id() : view->title();
+    m_desktop_icons->add({ view, label, icon_for_view(*view), [this, view] { restore_view(view); } });
+
+    if (was_focused) {
+        wlr_seat_keyboard_notify_clear_focus(m_seat);
+        focus_topmost();
+    }
+    process_cursor_motion(0);
+}
+
+void Server::restore_view(View* view)
+{
+    m_desktop_icons->remove(view);
+    view->set_minimized(false);
+    focus_view(view);
+    process_cursor_motion(0);
+}
+
+void Server::view_title_changed(View* view)
+{
+    if (view->minimized())
+        m_desktop_icons->set_label(view, view->title().empty() ? view->app_id() : view->title());
+}
+
+void Server::show_programs()
+{
+    m_desktop_icons->remove(m_programs.get());
+    m_programs->set_visible(true);
+    focus_programs();
+    process_cursor_motion(0);
+}
+
+void Server::minimize_programs()
+{
+    m_programs_grab = false;
+    unfocus_programs();
+    m_programs->set_visible(false);
+    m_desktop_icons->add({ m_programs.get(), "Programs", m_icon_loader.group_icon(32), [this] { show_programs(); } });
+    focus_topmost();
+    process_cursor_motion(0);
+}
+
+void Server::focus_programs()
+{
+    if (locked() || !m_programs->visible())
+        return;
+    if (View* previous = view_for_surface(m_seat->keyboard_state.focused_surface))
+        previous->set_activated(false);
+    wlr_seat_keyboard_notify_clear_focus(m_seat);
+    m_programs_focused = true;
+    m_programs->set_active(true);
+    m_programs->raise();
+}
+
+void Server::unfocus_programs()
+{
+    m_programs_focused = false;
+    m_programs->set_active(false);
+}
+
+// The front-most window that can take focus, else the launcher.
+void Server::focus_topmost()
+{
+    auto it = std::ranges::find_if(m_views, [](const auto& v) { return v->mapped() && !v->minimized(); });
+    if (it != m_views.end())
+        focus_view(it->get());
+    else
+        focus_programs();
+}
+
 // --- Views ---------------------------------------------------------------
 
 void Server::focus_view(View* view)
 {
-    if (!view)
+    if (!view || view->minimized())
         return;
+    unfocus_programs();
 
     auto it = std::ranges::find_if(m_views, [view](const auto& v) { return v.get() == view; });
     if (it == m_views.end())
@@ -439,10 +615,8 @@ void Server::focus_view(View* view)
     if (previous == view->surface() && !locked())
         return;
 
-    if (previous) {
-        if (auto* prev_toplevel = wlr_xdg_toplevel_try_from_wlr_surface(previous))
-            wlr_xdg_toplevel_set_activated(prev_toplevel, false);
-    }
+    if (View* previous_view = view_for_surface(previous))
+        previous_view->set_activated(false);
 
     m_views.splice(m_views.begin(), m_views, it);
     wlr_scene_node_raise_to_top(&view->tree()->node);
@@ -457,14 +631,14 @@ void Server::focus_view(View* view)
 
 void Server::view_mapped(View* view)
 {
-    // Centre new windows on the monitor under the pointer, cascading so they
-    // do not stack exactly.
-    const wlr_box geometry = view->toplevel()->base->geometry;
+    // Centre new windows (frame included) on the monitor under the pointer,
+    // cascading so they do not stack exactly.
+    const wlr_box outer = view->outer_box();
     const wlr_box output = output_box_at(m_cursor->x, m_cursor->y);
     const int mapped = static_cast<int>(std::ranges::count_if(m_views, [](const auto& v) { return v->mapped(); }));
     const int offset = ((mapped - 1) % 8) * 32;
-    view->move_to(output.x + std::max(0, (output.width - geometry.width) / 2 + offset) - geometry.x,
-        output.y + std::max(0, (output.height - geometry.height) / 2 + offset) - geometry.y);
+    view->move_to(view->x() + output.x + std::max(0, (output.width - outer.width) / 2 + offset) - outer.x,
+        view->y() + output.y + std::max(0, (output.height - outer.height) / 2 + offset) - outer.y);
     focus_view(view);
 }
 
@@ -472,12 +646,16 @@ void Server::view_unmapped(View* view)
 {
     if (m_grabbed_view == view)
         reset_cursor_mode();
+    if (m_frame_view == view)
+        m_frame_view = nullptr;
+    m_desktop_icons->remove(view);
+    if (view->minimized())
+        view->set_minimized(false); // a remapped window comes back visible
 
     if (m_seat->keyboard_state.focused_surface == view->surface()) {
         wlr_seat_keyboard_notify_clear_focus(m_seat);
-        auto next = std::ranges::find_if(m_views, [view](const auto& v) { return v.get() != view && v->mapped(); });
-        if (next != m_views.end())
-            focus_view(next->get());
+        // `view` is unmapped now, so it is skipped.
+        focus_topmost();
     }
 }
 
@@ -485,13 +663,16 @@ void Server::view_destroyed(View* view)
 {
     if (m_grabbed_view == view)
         reset_cursor_mode();
+    if (m_frame_view == view)
+        m_frame_view = nullptr;
+    m_desktop_icons->remove(view);
     std::erase_if(m_views, [view](const auto& v) { return v.get() == view; });
 }
 
 void Server::cycle_focus()
 {
     // Bring the bottom-most mapped view to the top.
-    auto it = std::find_if(m_views.rbegin(), m_views.rend(), [](const auto& v) { return v->mapped(); });
+    auto it = std::find_if(m_views.rbegin(), m_views.rend(), [](const auto& v) { return v->mapped() && !v->minimized(); });
     if (it != m_views.rend())
         focus_view(it->get());
 }

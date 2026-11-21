@@ -23,6 +23,7 @@ pkg_check_modules(WAYLAND   REQUIRED IMPORTED_TARGET wayland-server)
 pkg_check_modules(XKB       REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(PIXMAN    REQUIRED IMPORTED_TARGET pixman-1)
 pkg_check_modules(PANGO     REQUIRED IMPORTED_TARGET pangocairo cairo)
+pkg_check_modules(RSVG      REQUIRED IMPORTED_TARGET librsvg-2.0)
 pkg_check_modules(FREERDP   REQUIRED IMPORTED_TARGET freerdp3 freerdp-server3 winpr3)
 pkg_check_modules(PAM       REQUIRED IMPORTED_TARGET pam)
 
@@ -40,6 +41,11 @@ add_executable(wayfaraway
     src/server.cpp
     src/input.cpp
     src/view.cpp
+    src/retro_theme.cpp
+    src/desktop_entry.cpp
+    src/icon_loader.cpp
+    src/desktop_icons.cpp
+    src/program_manager.cpp
     src/lock_screen.cpp
     src/authenticator.cpp
     src/clipboard.cpp
@@ -79,6 +85,7 @@ target_link_libraries(wayfaraway PRIVATE
     PkgConfig::XKB
     PkgConfig::PIXMAN
     PkgConfig::PANGO
+    PkgConfig::RSVG
     PkgConfig::FREERDP
     PkgConfig::PAM
     OpenSSL::Crypto

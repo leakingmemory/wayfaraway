@@ -9,14 +9,20 @@
 
 #include "authenticator.hpp"
 #include "config.hpp"
+#include "desktop_entry.hpp"
+#include "double_click.hpp"
+#include "icon_loader.hpp"
 #include "listener.hpp"
 #include "lock_screen.hpp"
+#include "retro_theme.hpp"
 #include "wlr.hpp"
 
 namespace wfa {
 
 class View;
 class RdpServer;
+class ProgramManager;
+class DesktopIcons;
 
 // One monitor of the desktop, in desktop coordinates.
 struct Monitor {
@@ -96,11 +102,39 @@ public:
     void view_mapped(View* view);
     void view_unmapped(View* view);
     void view_destroyed(View* view);
+    void view_title_changed(View* view);
+    void minimize_view(View* view);
 
     void spawn(const std::string& command) const;
+    // Runs a program directly (no shell), optionally in `directory`.
+    void spawn(const std::vector<std::string>& argv, const std::string& directory = {}) const;
 
 private:
     enum class CursorMode { Passthrough, Move, Resize };
+
+    // What is under the pointer.
+    struct Hit {
+        enum class Kind { None, View, Programs, Icons } kind = Kind::None;
+        View* view = nullptr;
+        wlr_surface* surface = nullptr; // null on a window frame
+        double sx = 0, sy = 0;
+    };
+    Hit hit_test(double lx, double ly) const;
+
+    // --- Desktop shell (launcher, minimized icons, frames) -------------------
+    void reload_applications();
+    void launch(const DesktopEntry& entry);
+    void restore_view(View* view);
+    void show_programs();
+    void minimize_programs();
+    void focus_programs();
+    void unfocus_programs();
+    void focus_topmost();
+    View* view_for_surface(wlr_surface* surface) const;
+    cairo_surface_t* icon_for_view(const View& view);
+    void frame_press(View* view, retro::FrameHit hit, std::uint32_t time_msec);
+    void frame_release(double lx, double ly);
+    void update_cursor_image(const Hit& hit);
 
     struct Output {
         wlr_output* output = nullptr;
@@ -125,7 +159,6 @@ private:
     void process_cursor_move();
     void process_cursor_resize();
     void reset_cursor_mode();
-    View* view_at(double lx, double ly, wlr_surface** surface, double* sx, double* sy) const;
     void cycle_focus();
 
     Config m_config;
@@ -156,6 +189,23 @@ private:
     wlr_scene_tree* m_desktop_tree = nullptr;
     wlr_scene_tree* m_lock_tree = nullptr;
 
+    wlr_xdg_decoration_manager_v1* m_decoration_manager = nullptr;
+
+    IconLoader m_icon_loader;
+    std::vector<DesktopEntry> m_applications;
+    std::unique_ptr<DesktopEntryWatcher> m_application_watcher;
+    // Bottom of the desktop tree, below every window.
+    std::unique_ptr<DesktopIcons> m_desktop_icons;
+    std::unique_ptr<ProgramManager> m_programs;
+    bool m_programs_focused = false;
+    bool m_programs_grab = false;
+
+    // A frame button press waiting for its release.
+    View* m_frame_view = nullptr;
+    retro::FramePart m_frame_part = retro::FramePart::None;
+    DoubleClick m_frame_clicks;
+    const char* m_cursor_image = nullptr;
+
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<LockScreen> m_lock_screen;
     std::unique_ptr<RdpServer> m_rdp;
@@ -176,6 +226,7 @@ private:
     Listener m_new_output;
     Listener m_new_toplevel;
     Listener m_new_popup;
+    Listener m_new_decoration;
     Listener m_keyboard_key;
     Listener m_keyboard_modifiers;
     Listener m_request_set_cursor;

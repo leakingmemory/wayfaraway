@@ -20,6 +20,18 @@ on a lock screen.
   NSCodec is the fallback for clients without RemoteFX, or with a multifragment
   size too small for it; damage is split into tiles that fit the client's PDU
   limit.
+- **A classic desktop.** The look is a 16-colour-era desktop: teal background,
+  grey 3D frames and navy title bars.
+  - **Window frames:** apps that accept server-side decorations (foot, Qt,
+    Firefox, Alacritty and others) get the retro frame. Apps that draw their
+    own title bars, as most GTK apps do, keep theirs.
+  - **Launcher:** the **Programs** window lists every application from the
+    XDG `.desktop` files, sorted into groups by category (Accessories,
+    Internet, Office and so on). One group is open as an inner window; the
+    others are icons along the bottom. It reloads by itself when applications
+    are installed or removed.
+  - **Minimized windows:** these become captioned icons along the bottom of the
+    desktop.
 - **Multiple monitors.** With `/multimon`, each client monitor becomes its own
   Wayland output, so apps see real monitors (for example for fullscreen or
   `xdg-output`). The layout can change during a session through the Display
@@ -116,8 +128,25 @@ cmake --build build
 | Alt+F4                | Close window               |
 | Ctrl+Alt+L            | Lock                       |
 | Alt+drag / right-drag | Move / resize window       |
+| Ctrl+Esc              | Show the Programs window   |
+
+With the mouse:
+
+| Action | Where |
+|--------|-------|
+| Move | Drag the title bar |
+| Resize | Drag the border; the notched corners resize both ways |
+| Maximize / restore | Double-click the title bar, or the ▲ button |
+| Minimize | The ▼ button. Double-click the desktop icon to restore |
+| Close | Double-click the control-menu box (top left) |
+| Launch | Double-click a program in Programs, or select it and press Enter |
+| Switch group | Double-click a group icon, or press Tab |
 
 ## Status / next steps
+
+- The shell is deliberately minimal. There are no menus (so the control-menu
+  box has no menu), no task list, and nothing to edit groups. Programs always
+  sorts apps into category groups.
 
 - Clients that support neither RemoteFX nor NSCodec are refused. Planar/raw
   bitmap fallback and GFX/H.264 are still to come.

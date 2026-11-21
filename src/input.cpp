@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <span>
+#include <utility>
 
 #include <linux/input-event-codes.h>
 
+#include "program_manager.hpp"
+#include "desktop_icons.hpp"
 #include "server.hpp"
 #include "view.hpp"
 
@@ -153,8 +156,16 @@ void Server::on_key(const wlr_keyboard_key_event& event)
             handled = handle_keybinding(syms[i], modifiers);
     }
 
-    if (!handled)
-        wlr_seat_keyboard_notify_key(m_seat, event.time_msec, event.keycode, event.state);
+    if (handled)
+        return;
+
+    // The launcher is not a client: it gets keys straight from here.
+    if (m_programs_focused) {
+        if (pressed)
+            m_programs->key(xkb_state_key_get_one_sym(m_keyboard.xkb_state, xkb_keycode));
+        return;
+    }
+    wlr_seat_keyboard_notify_key(m_seat, event.time_msec, event.keycode, event.state);
 }
 
 bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
@@ -164,6 +175,10 @@ bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
 
     if (ctrl && alt && (sym == XKB_KEY_l || sym == XKB_KEY_L)) {
         lock();
+        return true;
+    }
+    if (ctrl && !alt && sym == XKB_KEY_Escape) {
+        show_programs();
         return true;
     }
     if (!alt || ctrl)
@@ -177,7 +192,9 @@ bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
         cycle_focus();
         return true;
     case XKB_KEY_F4:
-        if (!m_views.empty() && m_views.front()->mapped())
+        if (m_programs_focused)
+            minimize_programs();
+        else if (!m_views.empty() && m_views.front()->mapped())
             m_views.front()->close();
         return true;
     default:
@@ -190,6 +207,10 @@ bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
 void Server::inject_pointer_motion(double x, double y)
 {
     wlr_cursor_warp_closest(m_cursor, nullptr, x, y);
+    if (m_programs_grab) {
+        m_programs->motion(m_cursor->x, m_cursor->y);
+        return;
+    }
     process_cursor_motion(now_msec());
 }
 
@@ -204,8 +225,18 @@ void Server::inject_pointer_button(std::uint32_t button, bool pressed)
     const std::uint32_t time = now_msec();
 
     if (!pressed) {
+        if (m_programs_grab) {
+            m_programs_grab = false;
+            m_programs->release(m_cursor->x, m_cursor->y);
+            return;
+        }
         if (m_cursor_mode != CursorMode::Passthrough) {
             reset_cursor_mode();
+            process_cursor_motion(time);
+            return;
+        }
+        if (m_frame_view) {
+            frame_release(m_cursor->x, m_cursor->y);
             return;
         }
         wlr_seat_pointer_notify_button(m_seat, time, button, WL_POINTER_BUTTON_STATE_RELEASED);
@@ -213,10 +244,34 @@ void Server::inject_pointer_button(std::uint32_t button, bool pressed)
         return;
     }
 
-    wlr_surface* surface = nullptr;
-    double sx = 0, sy = 0;
-    View* view = view_at(m_cursor->x, m_cursor->y, &surface, &sx, &sy);
-    if (view) {
+    const Hit hit = hit_test(m_cursor->x, m_cursor->y);
+    switch (hit.kind) {
+    case Hit::Kind::Programs:
+        if (button == BTN_LEFT)
+            m_programs_grab = m_programs->press(m_cursor->x, m_cursor->y, time);
+        else
+            focus_programs();
+        return;
+    case Hit::Kind::Icons:
+        if (button == BTN_LEFT)
+            m_desktop_icons->press(m_cursor->x, m_cursor->y, time);
+        return;
+    case Hit::Kind::None:
+        return; // the bare desktop
+    case Hit::Kind::View:
+        break;
+    }
+
+    View* view = hit.view;
+    if (!hit.surface) {
+        if (button == BTN_LEFT)
+            frame_press(view, view->frame_hit(m_cursor->x, m_cursor->y), time);
+        else
+            focus_view(view);
+        return;
+    }
+
+    {
         focus_view(view);
         // Alt+drag moves, Alt+right-drag resizes from the nearest corner.
         if (wlr_keyboard_get_modifiers(&m_keyboard) & WLR_MODIFIER_ALT) {
@@ -243,6 +298,10 @@ void Server::inject_pointer_axis(wl_pointer_axis axis, double value, int value12
 {
     if (locked())
         return;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL && hit_test(m_cursor->x, m_cursor->y).kind == Hit::Kind::Programs) {
+        m_programs->scroll(m_cursor->x, m_cursor->y, value);
+        return;
+    }
     wlr_seat_pointer_notify_axis(m_seat, now_msec(), axis, value, value120, WL_POINTER_AXIS_SOURCE_WHEEL,
         WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
     wlr_seat_pointer_notify_frame(m_seat);
@@ -277,37 +336,120 @@ void Server::process_cursor_motion(std::uint32_t time_msec)
         return;
     }
 
-    wlr_surface* surface = nullptr;
-    double sx = 0, sy = 0;
-    View* view = view_at(m_cursor->x, m_cursor->y, &surface, &sx, &sy);
-    if (!view)
-        wlr_cursor_set_xcursor(m_cursor, m_cursor_manager, "default");
+    const Hit hit = hit_test(m_cursor->x, m_cursor->y);
+    update_cursor_image(hit);
 
-    if (surface) {
-        wlr_seat_pointer_notify_enter(m_seat, surface, sx, sy);
-        wlr_seat_pointer_notify_motion(m_seat, time_msec, sx, sy);
+    if (hit.surface) {
+        wlr_seat_pointer_notify_enter(m_seat, hit.surface, hit.sx, hit.sy);
+        wlr_seat_pointer_notify_motion(m_seat, time_msec, hit.sx, hit.sy);
     } else {
         wlr_seat_pointer_clear_focus(m_seat);
     }
     wlr_seat_pointer_notify_frame(m_seat);
 }
 
-View* Server::view_at(double lx, double ly, wlr_surface** surface, double* sx, double* sy) const
+void Server::update_cursor_image(const Hit& hit)
 {
-    wlr_scene_node* node = wlr_scene_node_at(&m_desktop_tree->node, lx, ly, sx, sy);
-    if (!node || node->type != WLR_SCENE_NODE_BUFFER)
-        return nullptr;
+    if (hit.surface) {
+        // The client sets its own; ours must be set again when it leaves.
+        m_cursor_image = nullptr;
+        return;
+    }
 
-    wlr_scene_surface* scene_surface = wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(node));
-    if (!scene_surface)
-        return nullptr;
-    *surface = scene_surface->surface;
+    const char* image = "default";
+    if (hit.kind == Hit::Kind::View) {
+        const retro::FrameHit frame = hit.view->frame_hit(m_cursor->x, m_cursor->y);
+        if (frame.part == retro::FramePart::Edge) {
+            const bool top = frame.edges & WLR_EDGE_TOP, bottom = frame.edges & WLR_EDGE_BOTTOM;
+            const bool left = frame.edges & WLR_EDGE_LEFT, right = frame.edges & WLR_EDGE_RIGHT;
+            image = top    ? (left ? "nw-resize" : right ? "ne-resize" : "n-resize")
+                : bottom ? (left ? "sw-resize" : right ? "se-resize" : "s-resize")
+                : left   ? "w-resize"
+                         : "e-resize";
+        }
+    }
+    if (image != m_cursor_image) {
+        m_cursor_image = image;
+        wlr_cursor_set_xcursor(m_cursor, m_cursor_manager, image);
+    }
+}
+
+void Server::frame_press(View* view, retro::FrameHit hit, std::uint32_t time_msec)
+{
+    focus_view(view);
+    switch (hit.part) {
+    case retro::FramePart::Title:
+        if (m_frame_clicks.click(view, static_cast<int>(hit.part), time_msec, m_cursor->x, m_cursor->y))
+            view->toggle_maximized();
+        else if (!view->maximized())
+            begin_interactive(view, false, 0);
+        break;
+    case retro::FramePart::Edge:
+        begin_interactive(view, true, hit.edges);
+        break;
+    case retro::FramePart::Control:
+        // Double-clicking the control-menu box closes the window.
+        if (m_frame_clicks.click(view, static_cast<int>(hit.part), time_msec, m_cursor->x, m_cursor->y))
+            view->close();
+        break;
+    case retro::FramePart::Minimize:
+    case retro::FramePart::Maximize:
+        // Buttons act on release, and only if still over them.
+        m_frame_view = view;
+        m_frame_part = hit.part;
+        break;
+    default:
+        break;
+    }
+}
+
+void Server::frame_release(double lx, double ly)
+{
+    View* view = std::exchange(m_frame_view, nullptr);
+    const retro::FramePart part = std::exchange(m_frame_part, retro::FramePart::None);
+    if (!view || view->frame_hit(lx, ly).part != part)
+        return;
+    if (part == retro::FramePart::Minimize)
+        minimize_view(view);
+    else if (part == retro::FramePart::Maximize)
+        view->toggle_maximized();
+}
+
+Server::Hit Server::hit_test(double lx, double ly) const
+{
+    Hit hit;
+    double sx = 0, sy = 0;
+    wlr_scene_node* node = wlr_scene_node_at(&m_desktop_tree->node, lx, ly, &sx, &sy);
+    if (!node)
+        return hit;
+
+    wlr_surface* surface = nullptr;
+    if (node->type == WLR_SCENE_NODE_BUFFER) {
+        if (auto* scene_surface = wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(node)))
+            surface = scene_surface->surface;
+    }
 
     for (wlr_scene_tree* tree = node->parent; tree; tree = tree->node.parent) {
-        if (tree->node.data)
-            return static_cast<View*>(tree->node.data);
+        if (tree == m_programs->tree()) {
+            hit.kind = Hit::Kind::Programs;
+            return hit;
+        }
+        if (tree == m_desktop_icons->tree()) {
+            hit.kind = Hit::Kind::Icons;
+            return hit;
+        }
+        // Only View roots carry data. A buffer that is not a surface is the
+        // window frame.
+        if (tree->node.data) {
+            hit.kind = Hit::Kind::View;
+            hit.view = static_cast<View*>(tree->node.data);
+            hit.surface = surface;
+            hit.sx = sx;
+            hit.sy = sy;
+            return hit;
+        }
     }
-    return nullptr;
+    return hit;
 }
 
 void Server::begin_interactive(View* view, bool resize, std::uint32_t edges)
