@@ -29,8 +29,9 @@ AUDIO_FORMAT pcm_format()
     return format;
 }
 
-// FreeRDP keeps pointers to these for the context's lifetime.
-AUDIO_FORMAT server_format = pcm_format();
+// What we offer and send; compared against the client's formats. The
+// context gets its own heap copy (see start()).
+const AUDIO_FORMAT server_format = pcm_format();
 
 } // namespace
 
@@ -55,9 +56,16 @@ bool RdpAudio::start(wl_event_loop* loop, void* vcm)
 
     m_context->data = this;
     m_context->use_dynamic_virtual_channel = FALSE;
-    m_context->server_formats = &server_format;
+    // rdpsnd_server_context_free() calls free() on server_formats, so it must
+    // be a heap block the context owns; src_format points into it and is not
+    // freed separately.
+    AUDIO_FORMAT* formats = audio_formats_new(1);
+    if (!formats)
+        return false;
+    formats[0] = server_format; // data is nullptr: nothing else to own
+    m_context->server_formats = formats;
     m_context->num_server_formats = 1;
-    m_context->src_format = &server_format;
+    m_context->src_format = &formats[0];
     m_context->latency = latency_ms;
     m_context->Activated = &RdpAudio::on_activated;
 
@@ -78,11 +86,9 @@ RdpAudio::~RdpAudio()
 {
     if (m_source)
         wl_event_source_remove(m_source);
-    if (m_context) {
-        if (m_context->Stop)
-            m_context->Stop(m_context);
+    // Stops the channel, then frees the context and its server_formats.
+    if (m_context)
         rdpsnd_server_context_free(m_context);
-    }
 }
 
 int RdpAudio::on_channel_event(int fd, uint32_t mask, void* data)
