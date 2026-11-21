@@ -124,11 +124,23 @@ cmake --build build
 | Keys                  | Action                     |
 |-----------------------|----------------------------|
 | Alt+Return            | Launch terminal (`-t`)     |
-| Alt+Tab               | Cycle windows              |
+| Super (Windows key)   | Open Programs, or go back to the window you came from |
+| Ctrl+Esc              | Same as Super              |
+| Alt+Tab               | Switch tasks: hold Alt, press Tab to move, release to switch |
+| Alt+Shift+Tab         | Switch tasks, backwards    |
 | Alt+F4                | Close window               |
 | Ctrl+Alt+L            | Lock                       |
 | Alt+drag / right-drag | Move / resize window       |
-| Ctrl+Esc              | Show the Programs window   |
+
+In the task switcher, Escape cancels and a click picks a task directly. It
+lists every window in most-recently-used order, including minimized windows
+(restored when chosen) and Programs. A quick Alt+Tab tap flips between the two
+most recent windows.
+
+The Windows key and Alt+Tab must get past your local desktop to reach the
+session. With mstsc, set *Apply Windows key combinations* to *On the remote
+computer*, or use full screen. xfreerdp passes them on while it has the
+keyboard grabbed (in full screen, or with `+grab-keyboard`).
 
 With the mouse:
 
@@ -145,7 +157,7 @@ With the mouse:
 ## Status / next steps
 
 - The shell is deliberately minimal. There are no menus (so the control-menu
-  box has no menu), no task list, and nothing to edit groups. Programs always
+  box has no menu), no taskbar beyond Alt+Tab, and nothing to edit groups. Programs always
   sorts apps into category groups.
 
 - Clients that support neither RemoteFX nor NSCodec are refused. Planar/raw

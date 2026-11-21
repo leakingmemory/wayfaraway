@@ -14,6 +14,7 @@
 #include "desktop_icons.hpp"
 #include "program_manager.hpp"
 #include "rdp_server.hpp"
+#include "task_switcher.hpp"
 #include "view.hpp"
 
 namespace wfa {
@@ -96,6 +97,8 @@ Server::Server(Config config)
         [this](const DesktopEntry& entry) { launch(entry); });
     m_programs->on_minimize = [this] { minimize_programs(); };
     m_programs->on_focus = [this] { focus_programs(); };
+    m_overlay_tree = wlr_scene_tree_create(&m_scene->tree);
+    m_switcher = std::make_unique<TaskSwitcher>(m_overlay_tree);
     m_lock_tree = wlr_scene_tree_create(&m_scene->tree);
     // Fail closed: nothing on the desktop is visible until the first unlock.
     wlr_scene_node_set_enabled(&m_desktop_tree->node, false);
@@ -171,6 +174,7 @@ Server::~Server()
 
     m_lock_screen.reset();
     m_application_watcher.reset();
+    m_switcher.reset();
     m_programs.reset();
     m_desktop_icons.reset();
     m_authenticator.reset();
@@ -245,6 +249,8 @@ void Server::run()
 
 void Server::lock()
 {
+    switcher_cancel();
+    m_super_tap = false;
     if (locked()) {
         m_lock_screen->lock(); // resets any half-typed password
         return;
@@ -635,11 +641,93 @@ void Server::unfocus_programs()
 // The front-most window that can take focus, else the launcher.
 void Server::focus_topmost()
 {
-    auto it = std::ranges::find_if(m_views, [](const auto& v) { return v->mapped() && !v->minimized(); });
-    if (it != m_views.end())
-        focus_view(it->get());
-    else
+    if (!focus_topmost_window())
         focus_programs();
+}
+
+bool Server::focus_topmost_window()
+{
+    auto it = std::ranges::find_if(m_views, [](const auto& v) { return v->mapped() && !v->minimized(); });
+    if (it == m_views.end())
+        return false;
+    focus_view(it->get());
+    return true;
+}
+
+// Super and Ctrl+Esc: open the launcher, or go back to the window you came
+// from if it already has focus.
+void Server::toggle_programs()
+{
+    if (m_programs_focused && m_programs->visible()) {
+        focus_topmost_window();
+        process_cursor_motion(0);
+    } else {
+        show_programs();
+    }
+}
+
+// --- Alt+Tab ----------------------------------------------------------------
+
+void Server::switcher_step(int direction)
+{
+    if (m_switcher->active()) {
+        m_switcher->step(direction);
+        return;
+    }
+
+    // Most recently used first. m_views is in focus order; the launcher is
+    // first if it has focus, last otherwise.
+    std::vector<TaskSwitcher::Task> tasks;
+    const TaskSwitcher::Task programs{ m_programs.get(), "Programs", m_icon_loader.group_icon(32),
+        !m_programs->visible() };
+    if (m_programs_focused)
+        tasks.push_back(programs);
+    for (const auto& view : m_views) {
+        if (!view->mapped())
+            continue;
+        tasks.push_back({ view.get(), view->title().empty() ? view->app_id() : view->title(), icon_for_view(*view),
+            view->minimized() });
+    }
+    if (!m_programs_focused)
+        tasks.push_back(programs);
+
+    // The first press already moves to the next task, so a quick Alt+Tab
+    // flips between the two most recent ones.
+    const std::size_t count = tasks.size();
+    const std::size_t initial = count < 2 ? 0 : direction > 0 ? 1 : count - 1;
+    m_switcher->start(std::move(tasks), output_box_at(m_cursor->x, m_cursor->y), initial);
+}
+
+void Server::switcher_commit()
+{
+    const void* key = m_switcher->selected();
+    m_switcher->hide();
+    if (key)
+        activate_task(key);
+}
+
+void Server::switcher_cancel()
+{
+    if (m_switcher)
+        m_switcher->hide();
+}
+
+void Server::activate_task(const void* key)
+{
+    if (key == m_programs.get()) {
+        show_programs();
+        return;
+    }
+    for (const auto& view : m_views) {
+        if (view.get() != key)
+            continue;
+        if (view->minimized())
+            restore_view(view.get());
+        else
+            focus_view(view.get());
+        process_cursor_motion(0);
+        return;
+    }
 }
 
 // --- Views ---------------------------------------------------------------
@@ -691,6 +779,7 @@ void Server::view_unmapped(View* view)
         reset_cursor_mode();
     if (m_frame_view == view)
         m_frame_view = nullptr;
+    switcher_cancel();
     m_desktop_icons->remove(view);
     if (view->minimized())
         view->set_minimized(false); // a remapped window comes back visible
@@ -708,16 +797,9 @@ void Server::view_destroyed(View* view)
         reset_cursor_mode();
     if (m_frame_view == view)
         m_frame_view = nullptr;
+    switcher_cancel();
     m_desktop_icons->remove(view);
     std::erase_if(m_views, [view](const auto& v) { return v.get() == view; });
-}
-
-void Server::cycle_focus()
-{
-    // Bring the bottom-most mapped view to the top.
-    auto it = std::find_if(m_views.rbegin(), m_views.rend(), [](const auto& v) { return v->mapped() && !v->minimized(); });
-    if (it != m_views.rend())
-        focus_view(it->get());
 }
 
 } // namespace wfa

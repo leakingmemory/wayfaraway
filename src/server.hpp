@@ -23,6 +23,7 @@ class View;
 class RdpServer;
 class ProgramManager;
 class DesktopIcons;
+class TaskSwitcher;
 
 // One monitor of the desktop, in desktop coordinates.
 struct Monitor {
@@ -130,6 +131,14 @@ private:
     void focus_programs();
     void unfocus_programs();
     void focus_topmost();
+    bool focus_topmost_window();
+    void toggle_programs();
+
+    // Alt+Tab.
+    void switcher_step(int direction);
+    void switcher_commit();
+    void switcher_cancel();
+    void activate_task(const void* key);
     View* view_for_surface(wlr_surface* surface) const;
     cairo_surface_t* icon_for_view(const View& view);
     void frame_press(View* view, retro::FrameHit hit, std::uint32_t time_msec);
@@ -159,7 +168,6 @@ private:
     void process_cursor_move();
     void process_cursor_resize();
     void reset_cursor_mode();
-    void cycle_focus();
 
     Config m_config;
 
@@ -198,6 +206,12 @@ private:
     std::unique_ptr<DesktopIcons> m_desktop_icons;
     std::unique_ptr<ProgramManager> m_programs;
     bool m_programs_focused = false;
+    // Between the desktop and the lock screen.
+    wlr_scene_tree* m_overlay_tree = nullptr;
+    std::unique_ptr<TaskSwitcher> m_switcher;
+    // Super pressed on its own; released without another key, it toggles
+    // the launcher.
+    bool m_super_tap = false;
     bool m_programs_grab = false;
 
     // A frame button press waiting for its release.

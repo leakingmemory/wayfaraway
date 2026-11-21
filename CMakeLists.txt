@@ -46,6 +46,7 @@ add_executable(wayfaraway
     src/icon_loader.cpp
     src/desktop_icons.cpp
     src/program_manager.cpp
+    src/task_switcher.cpp
     src/lock_screen.cpp
     src/authenticator.cpp
     src/clipboard.cpp

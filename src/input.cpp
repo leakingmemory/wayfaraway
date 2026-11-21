@@ -5,8 +5,9 @@
 
 #include <linux/input-event-codes.h>
 
-#include "program_manager.hpp"
 #include "desktop_icons.hpp"
+#include "program_manager.hpp"
+#include "task_switcher.hpp"
 #include "server.hpp"
 #include "view.hpp"
 
@@ -60,6 +61,8 @@ void Server::on_modifiers()
         = xkb_state_mod_name_is_active(m_keyboard.xkb_state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_EFFECTIVE) > 0;
     if (m_lock_screen)
         m_lock_screen->set_caps_lock(caps_lock);
+    if (m_switcher && m_switcher->active() && !(wlr_keyboard_get_modifiers(&m_keyboard) & WLR_MODIFIER_ALT))
+        switcher_commit();
     if (!locked())
         wlr_seat_keyboard_notify_modifiers(m_seat, &m_keyboard.modifiers);
 }
@@ -147,6 +150,36 @@ void Server::on_key(const wlr_keyboard_key_event& event)
         return;
     }
 
+    const xkb_keysym_t sym = xkb_state_key_get_one_sym(m_keyboard.xkb_state, xkb_keycode);
+    const bool super = sym == XKB_KEY_Super_L || sym == XKB_KEY_Super_R;
+
+    // A Super tap (pressed and released alone) toggles the launcher; any
+    // other key in between makes it a combination instead.
+    if (pressed) {
+        m_super_tap = super && m_keyboard.num_keycodes == 1;
+    } else if (super && std::exchange(m_super_tap, false)) {
+        toggle_programs();
+    }
+
+    // While the switcher is up, it takes key presses. Releases still reach
+    // the focused window, which saw Alt go down and must see it come up.
+    // It commits when Alt is released (see on_modifiers).
+    if (m_switcher->active() && pressed) {
+        switch (sym) {
+        case XKB_KEY_Escape: switcher_cancel(); break;
+        case XKB_KEY_Return:
+        case XKB_KEY_KP_Enter: switcher_commit(); break;
+        case XKB_KEY_Tab:
+        case XKB_KEY_Right:
+        case XKB_KEY_Down: m_switcher->step(1); break;
+        case XKB_KEY_ISO_Left_Tab:
+        case XKB_KEY_Left:
+        case XKB_KEY_Up: m_switcher->step(-1); break;
+        default: break;
+        }
+        return;
+    }
+
     bool handled = false;
     if (pressed) {
         const std::uint32_t modifiers = wlr_keyboard_get_modifiers(&m_keyboard);
@@ -178,7 +211,7 @@ bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
         return true;
     }
     if (ctrl && !alt && sym == XKB_KEY_Escape) {
-        show_programs();
+        toggle_programs();
         return true;
     }
     if (!alt || ctrl)
@@ -189,7 +222,10 @@ bool Server::handle_keybinding(xkb_keysym_t sym, std::uint32_t modifiers)
         spawn(m_config.terminal);
         return true;
     case XKB_KEY_Tab:
-        cycle_focus();
+        switcher_step(1);
+        return true;
+    case XKB_KEY_ISO_Left_Tab: // Shift+Tab
+        switcher_step(-1);
         return true;
     case XKB_KEY_F4:
         if (m_programs_focused)
@@ -241,6 +277,16 @@ void Server::inject_pointer_button(std::uint32_t button, bool pressed)
         }
         wlr_seat_pointer_notify_button(m_seat, time, button, WL_POINTER_BUTTON_STATE_RELEASED);
         wlr_seat_pointer_notify_frame(m_seat);
+        return;
+    }
+
+    m_super_tap = false;
+    if (m_switcher->active()) {
+        // A click picks a task directly; anywhere else cancels.
+        const void* key = m_switcher->task_at(m_cursor->x, m_cursor->y);
+        m_switcher->hide();
+        if (key)
+            activate_task(key);
         return;
     }
 
