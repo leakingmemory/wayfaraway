@@ -135,8 +135,11 @@ void Server::on_key(const wlr_keyboard_key_event& event)
             xkb_keysym_t sym = xkb_state_key_get_one_sym(m_keyboard.xkb_state, xkb_keycode);
             char utf8[64]{};
             int len = xkb_state_key_get_utf8(m_keyboard.xkb_state, xkb_keycode, utf8, sizeof(utf8));
-            m_lock_screen->handle_key(sym, std::string_view(utf8, std::clamp(len, 0, static_cast<int>(sizeof(utf8) - 1))));
+            m_lock_screen->key_pressed(event.keycode, sym,
+                std::string_view(utf8, std::clamp(len, 0, static_cast<int>(sizeof(utf8) - 1))));
             explicit_bzero(utf8, sizeof(utf8));
+        } else {
+            m_lock_screen->key_released(event.keycode);
         }
         return;
     }

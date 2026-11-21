@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "authenticator.hpp"
@@ -29,9 +31,12 @@ public:
     // are centred on the primary monitor, so they never straddle a bezel.
     void set_layout(int width, int height, wlr_box primary);
 
-    // Feeds one key press while locked. `utf8` is the text the key produces
-    // under the current xkb state (empty for non-printing keys).
-    void handle_key(xkb_keysym_t sym, std::string_view utf8);
+    // Feeds key presses and releases while locked. `utf8` is the text the
+    // key produces under the current xkb state (empty for non-printing
+    // keys). `keycode` identifies the key so a held key auto-repeats until
+    // it is released; RDP clients' own repeats are dropped before this.
+    void key_pressed(std::uint32_t keycode, xkb_keysym_t sym, std::string_view utf8);
+    void key_released(std::uint32_t keycode);
 
     // Shows a "Caps Lock is on" hint, since an unexpected Caps Lock is the
     // usual reason a correct password is rejected.
@@ -39,6 +44,12 @@ public:
 
 private:
     static int on_tick(void* data);
+    static int on_repeat(void* data);
+    static int on_blink(void* data);
+    void handle_key(xkb_keysym_t sym, std::string_view utf8);
+    void stop_repeat();
+    void restart_blink();
+    void update_caret();
     void submit();
     void clear_password();
     void render();
@@ -48,7 +59,12 @@ private:
 
     wlr_scene_tree* m_tree;
     wlr_scene_buffer* m_buffer_node;
+    // A separate node, so blinking repaints a few pixels instead of the
+    // whole desktop-sized buffer (and over RDP, sends that little).
+    wlr_scene_rect* m_caret;
     wl_event_source* m_timer;
+    wl_event_source* m_blink_timer;
+    wl_event_source* m_repeat_timer;
 
     int m_width = 0;
     int m_height = 0;
@@ -63,6 +79,13 @@ private:
     bool m_status_is_error = false;
     std::string m_rendered_clock;
     bool m_caps_lock = false;
+
+    wlr_box m_caret_box{};
+    bool m_caret_on = true;
+
+    std::optional<std::uint32_t> m_repeat_keycode;
+    xkb_keysym_t m_repeat_sym = XKB_KEY_NoSymbol;
+    std::string m_repeat_utf8;
 };
 
 } // namespace wfa

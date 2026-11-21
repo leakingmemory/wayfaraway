@@ -65,9 +65,13 @@ struct Rgba {
 
 void set_color(cairo_t* cr, Rgba c) { cairo_set_source_rgba(cr, c.r, c.g, c.b, c.a); }
 
+struct TextSize {
+    int width;
+    int height;
+};
+
 // Draws `text` horizontally centred on `cx` with its top edge at `y`.
-// Returns the height of the laid-out text.
-int draw_text(cairo_t* cr, std::string_view text, const char* font, double cx, double y, Rgba color)
+TextSize draw_text(cairo_t* cr, std::string_view text, const char* font, double cx, double y, Rgba color)
 {
     PangoLayout* layout = pango_cairo_create_layout(cr);
     PangoFontDescription* desc = pango_font_description_from_string(font);
@@ -81,7 +85,7 @@ int draw_text(cairo_t* cr, std::string_view text, const char* font, double cx, d
     cairo_move_to(cr, cx - w / 2.0, y);
     pango_cairo_show_layout(cr, layout);
     g_object_unref(layout);
-    return h;
+    return { w, h };
 }
 
 void rounded_rect(cairo_t* cr, double x, double y, double w, double h, double r)
@@ -108,6 +112,14 @@ std::string date_text()
 
 constexpr std::size_t max_password_length = 512;
 
+// Same timing as the virtual keyboard's repeat info (600 ms, 25 Hz).
+constexpr int repeat_delay_ms = 600;
+constexpr int repeat_interval_ms = 40;
+constexpr int blink_interval_ms = 530;
+constexpr int caret_width = 2;
+constexpr int caret_height = 22;
+constexpr float caret_color[4] = { 0.93f, 0.94f, 0.97f, 1.0f };
+
 } // namespace
 
 LockScreen::LockScreen(wl_event_loop* loop, wlr_scene_tree* parent, Authenticator& authenticator)
@@ -115,14 +127,21 @@ LockScreen::LockScreen(wl_event_loop* loop, wlr_scene_tree* parent, Authenticato
     , m_authenticator(authenticator)
     , m_tree(wlr_scene_tree_create(parent))
     , m_buffer_node(wlr_scene_buffer_create(m_tree, nullptr))
+    , m_caret(wlr_scene_rect_create(m_tree, caret_width, caret_height, caret_color))
     , m_timer(wl_event_loop_add_timer(loop, &LockScreen::on_tick, this))
+    , m_blink_timer(wl_event_loop_add_timer(loop, &LockScreen::on_blink, this))
+    , m_repeat_timer(wl_event_loop_add_timer(loop, &LockScreen::on_repeat, this))
 {
+    wlr_scene_node_set_enabled(&m_caret->node, false);
     wl_event_source_timer_update(m_timer, 1000);
 }
 
 LockScreen::~LockScreen()
 {
     clear_password();
+    stop_repeat();
+    wl_event_source_remove(m_repeat_timer);
+    wl_event_source_remove(m_blink_timer);
     wl_event_source_remove(m_timer);
     wlr_scene_node_destroy(&m_tree->node);
 }
@@ -130,6 +149,7 @@ LockScreen::~LockScreen()
 void LockScreen::lock()
 {
     ++m_generation;
+    stop_repeat();
     clear_password();
     m_status.clear();
     m_status_is_error = false;
@@ -139,6 +159,7 @@ void LockScreen::lock()
     }
     wlr_scene_node_set_enabled(&m_tree->node, true);
     render();
+    restart_blink();
 }
 
 void LockScreen::set_layout(int width, int height, wlr_box primary)
@@ -149,6 +170,79 @@ void LockScreen::set_layout(int width, int height, wlr_box primary)
     m_height = height;
     m_primary = primary;
     render();
+}
+
+void LockScreen::key_pressed(std::uint32_t keycode, xkb_keysym_t sym, std::string_view utf8)
+{
+    if (!m_locked)
+        return;
+    stop_repeat();
+    handle_key(sym, utf8);
+
+    // Editing keys repeat while held; Enter and Escape never do.
+    const bool printable = !utf8.empty() && static_cast<unsigned char>(utf8.front()) >= 0x20;
+    if (m_locked && !m_authenticator.busy() && (sym == XKB_KEY_BackSpace || printable)) {
+        m_repeat_keycode = keycode;
+        m_repeat_sym = sym;
+        m_repeat_utf8 = utf8;
+        wl_event_source_timer_update(m_repeat_timer, repeat_delay_ms);
+    }
+}
+
+void LockScreen::key_released(std::uint32_t keycode)
+{
+    if (m_repeat_keycode == keycode)
+        stop_repeat();
+}
+
+int LockScreen::on_repeat(void* data)
+{
+    auto* self = static_cast<LockScreen*>(data);
+    if (!self->m_locked || self->m_authenticator.busy() || !self->m_repeat_keycode) {
+        self->stop_repeat();
+        return 0;
+    }
+    self->handle_key(self->m_repeat_sym, self->m_repeat_utf8);
+    wl_event_source_timer_update(self->m_repeat_timer, repeat_interval_ms);
+    return 0;
+}
+
+void LockScreen::stop_repeat()
+{
+    wl_event_source_timer_update(m_repeat_timer, 0);
+    m_repeat_keycode.reset();
+    m_repeat_sym = XKB_KEY_NoSymbol;
+    // It may hold a password character.
+    explicit_bzero(m_repeat_utf8.data(), m_repeat_utf8.size());
+    m_repeat_utf8.clear();
+}
+
+int LockScreen::on_blink(void* data)
+{
+    auto* self = static_cast<LockScreen*>(data);
+    if (!self->m_locked)
+        return 0;
+    self->m_caret_on = !self->m_caret_on;
+    self->update_caret();
+    wl_event_source_timer_update(self->m_blink_timer, blink_interval_ms);
+    return 0;
+}
+
+// Shows the caret solid and restarts its blink cycle, as text fields do
+// after every keystroke.
+void LockScreen::restart_blink()
+{
+    m_caret_on = true;
+    update_caret();
+    wl_event_source_timer_update(m_blink_timer, m_locked ? blink_interval_ms : 0);
+}
+
+void LockScreen::update_caret()
+{
+    // Hidden while the password is being checked.
+    const bool visible = m_locked && m_caret_on && !m_authenticator.busy() && m_width > 0;
+    wlr_scene_node_set_position(&m_caret->node, m_caret_box.x, m_caret_box.y);
+    wlr_scene_node_set_enabled(&m_caret->node, visible);
 }
 
 void LockScreen::handle_key(xkb_keysym_t sym, std::string_view utf8)
@@ -187,6 +281,7 @@ void LockScreen::handle_key(xkb_keysym_t sym, std::string_view utf8)
         m_status_is_error = false;
     }
     render();
+    restart_blink();
 }
 
 void LockScreen::set_caps_lock(bool on)
@@ -203,6 +298,7 @@ void LockScreen::submit()
     if (m_password.empty())
         return;
 
+    stop_repeat();
     m_status = "Verifying…";
     m_status_is_error = false;
     render();
@@ -216,7 +312,9 @@ void LockScreen::submit()
         if (success) {
             m_locked = false;
             m_status.clear();
+            stop_repeat();
             wl_event_source_timer_update(m_timer, 0);
+            wl_event_source_timer_update(m_blink_timer, 0);
             wlr_scene_node_set_enabled(&m_tree->node, false);
             wlr_log(WLR_INFO, "Unlocked by %s", m_authenticator.user().c_str());
             if (on_unlock)
@@ -227,7 +325,9 @@ void LockScreen::submit()
         m_status = "Incorrect password";
         m_status_is_error = true;
         render();
+        restart_blink();
     });
+    update_caret(); // hide it while verifying
 }
 
 void LockScreen::clear_password()
@@ -271,11 +371,11 @@ void LockScreen::render()
 
     m_rendered_clock = clock_text();
     double y = m_primary.y + m_primary.height * 0.28;
-    y += draw_text(cr, m_rendered_clock, "Sans Light 96", cx, y, text);
-    y += draw_text(cr, date_text(), "Sans 20", cx, y, muted);
+    y += draw_text(cr, m_rendered_clock, "Sans Light 96", cx, y, text).height;
+    y += draw_text(cr, date_text(), "Sans 20", cx, y, muted).height;
 
     y += 56;
-    y += draw_text(cr, m_authenticator.user(), "Sans Bold 18", cx, y, text) + 16;
+    y += draw_text(cr, m_authenticator.user(), "Sans Bold 18", cx, y, text).height + 16;
 
     // Password field.
     const double field_w = 360, field_h = 48;
@@ -291,8 +391,11 @@ void LockScreen::render()
     for (unsigned char c : m_password)
         glyphs += (c & 0xC0) != 0x80;
 
+    double caret_x = cx;
     if (glyphs == 0) {
-        draw_text(cr, "Password", "Sans 14", cx, y + 13, { 1, 1, 1, 0.35 });
+        const TextSize placeholder = draw_text(cr, "Password", "Sans 14", cx, y + 13, { 1, 1, 1, 0.35 });
+        // At the start of the placeholder, like an empty text field.
+        caret_x = cx - placeholder.width / 2.0 - 3;
     } else {
         const double dot_spacing = 18;
         const std::size_t shown = std::min<std::size_t>(glyphs, static_cast<std::size_t>((field_w - 32) / dot_spacing));
@@ -302,13 +405,17 @@ void LockScreen::render()
             cairo_arc(cr, dx, y + field_h / 2, 5, 0, 2 * G_PI);
             cairo_fill(cr);
         }
+        // Just after the last dot.
+        caret_x = dx - dot_spacing + 10;
     }
+    m_caret_box = { static_cast<int>(caret_x), static_cast<int>(y + (field_h - caret_height) / 2), caret_width,
+        caret_height };
     y += field_h + 18;
 
     if (!m_status.empty())
-        y += draw_text(cr, m_status, "Sans 13", cx, y, m_status_is_error ? Rgba{ 0.95, 0.45, 0.50 } : muted);
+        y += draw_text(cr, m_status, "Sans 13", cx, y, m_status_is_error ? Rgba{ 0.95, 0.45, 0.50 } : muted).height;
     else
-        y += draw_text(cr, "Type your password and press Enter", "Sans 12", cx, y, { 1, 1, 1, 0.35 });
+        y += draw_text(cr, "Type your password and press Enter", "Sans 12", cx, y, { 1, 1, 1, 0.35 }).height;
 
     if (m_caps_lock)
         draw_text(cr, "Caps Lock is on", "Sans Bold 12", cx, y + 10, { 0.96, 0.76, 0.35 });
@@ -318,6 +425,7 @@ void LockScreen::render()
 
     wlr_scene_buffer_set_buffer(m_buffer_node, &buffer->base);
     wlr_buffer_drop(&buffer->base);
+    update_caret();
 }
 
 } // namespace wfa
