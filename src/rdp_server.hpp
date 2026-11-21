@@ -13,6 +13,7 @@ struct rdp_freerdp_peer;
 namespace wfa {
 
 class RdpPeer;
+class AudioSink;
 
 // Accepts RDP connections and streams the virtual output to the active peer
 // using RemoteFX surface commands. Only one peer is active at a time: a new
@@ -56,6 +57,11 @@ private:
     // FreeRDP callbacks.
     std::vector<std::unique_ptr<RdpPeer>> m_dead_peers;
     wl_event_source* m_reaper = nullptr;
+
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    // Shared by successive peers, so audio routing survives reconnects.
+    std::unique_ptr<AudioSink> m_audio;
+#endif
 
     std::vector<std::byte> m_shadow;
     int m_width = 0;

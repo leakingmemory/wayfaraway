@@ -25,6 +25,14 @@ pkg_check_modules(PANGO     REQUIRED IMPORTED_TARGET pangocairo cairo)
 pkg_check_modules(FREERDP   REQUIRED IMPORTED_TARGET freerdp3 freerdp-server3 winpr3)
 pkg_check_modules(PAM       REQUIRED IMPORTED_TARGET pam)
 
+option(WAYFARAWAY_AUDIO "Forward audio to RDP clients through a PipeWire sink" ON)
+if(WAYFARAWAY_AUDIO)
+    pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+    if(NOT PIPEWIRE_FOUND)
+        message(WARNING "libpipewire-0.3 not found; building without audio")
+    endif()
+endif()
+
 add_executable(wayfaraway
     src/main.cpp
     src/config.cpp
@@ -34,8 +42,15 @@ add_executable(wayfaraway
     src/lock_screen.cpp
     src/authenticator.cpp
     src/clipboard.cpp
+    src/rdp_audio.cpp
     src/rdp_server.cpp
 )
+
+if(PIPEWIRE_FOUND)
+    target_sources(wayfaraway PRIVATE src/audio_sink.cpp)
+    target_compile_definitions(wayfaraway PRIVATE WAYFARAWAY_HAVE_PIPEWIRE)
+    target_link_libraries(wayfaraway PRIVATE PkgConfig::PIPEWIRE)
+endif()
 
 target_compile_definitions(wayfaraway PRIVATE
     WLR_USE_UNSTABLE

@@ -33,11 +33,17 @@ on a lock screen.
   be pasted on the client after the app that copied it exits. Nothing crosses
   while the session is locked. A copy made on the client at the lock screen
   takes effect on unlock.
+- **Audio.** The compositor creates a PipeWire sink, "Remote desktop (RDP)",
+  with a high session priority, so it usually becomes the default output. What
+  apps play to it is sent to the client over rdpsnd as 44.1 kHz stereo PCM, and
+  silence is not sent. The sink outlives RDP connections, so audio routing
+  survives reconnects. Nothing is played to a client at the lock screen.
 
 ## Dependencies
 
 wlroots 0.20, wayland-server, xkbcommon, pixman, cairo, pango, FreeRDP 3
-(`freerdp3`, `freerdp-server3`, `winpr3`) and PAM. You need a C++23 compiler
+(`freerdp3`, `freerdp-server3`, `winpr3`) and PAM. PipeWire (`libpipewire-0.3`) is optional and enables audio. Turn it
+off with `-DWAYFARAWAY_AUDIO=OFF`. You need a C++23 compiler
 (GCC 14+ or Clang 18+) and CMake 3.28 or newer.
 
 ## Build
@@ -66,7 +72,8 @@ cmake --build build
    ```
    You can also use the systemd user unit in `data/wayfaraway.service`.
    Connect with any client that supports RemoteFX or NSCodec, for example
-   `xfreerdp /v:host /rfx /cert:ignore`, Remmina or mstsc.
+   `xfreerdp /v:host /rfx /sound /cert:ignore`, Remmina or mstsc. Audio needs a
+   running PipeWire user session and a client with sound redirection enabled.
 
 ## Keys
 
@@ -86,8 +93,10 @@ cmake --build build
   frames; damage is coalesced meanwhile). Clients without it are not throttled
   yet; socket write-blocking could cover them.
 - The clipboard is text-only: images, HTML, files and the primary selection
-  aren't bridged. Audio (rdpsnd) and lock-key synchronisation aren't
-  implemented yet.
+  aren't bridged. Lock-key synchronisation isn't implemented yet.
+- Audio is output-only (no microphone via audin) and plain PCM at a fixed
+  44.1 kHz. Clients without that format get no sound. Compressed formats such as
+  AAC/Opus, and throttling for slow links, are still to come.
 - There's no rate limiting of unlock attempts beyond PAM's own fail delay.
 - Window state doesn't survive a compositor restart. Adding
   `xdg-session-management-v1` would let clients restore their windows.

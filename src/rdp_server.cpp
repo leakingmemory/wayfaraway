@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cstring>
+#include <span>
 
 #include <linux/input-event-codes.h>
 
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/cliprdr.h>
+#include <freerdp/channels/rdpsnd.h>
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/codec/nsc.h>
 #include <freerdp/codec/rfx.h>
@@ -23,7 +25,9 @@
 #include <winpr/synch.h>
 #include <winpr/wtsapi.h>
 
+#include "audio_sink.hpp"
 #include "clipboard.hpp"
+#include "rdp_audio.hpp"
 
 namespace wfa {
 
@@ -129,6 +133,7 @@ public:
     {
         // Gives up the client's clipboard offer on the seat right away.
         m_clipboard.reset();
+        m_audio.reset();
         remove_sources(m_sources);
         if (m_ack_timer) {
             wl_event_source_remove(m_ack_timer);
@@ -145,6 +150,14 @@ public:
     {
         if (m_clipboard)
             m_clipboard->set_locked(locked);
+        if (m_audio)
+            m_audio->set_locked(locked);
+    }
+
+    void push_audio(std::span<const std::byte> samples)
+    {
+        if (m_audio)
+            m_audio->push(samples);
     }
 
 private:
@@ -190,6 +203,7 @@ private:
     std::vector<wl_event_source*> m_sources;
     HANDLE m_vcm = nullptr;
     std::unique_ptr<Clipboard> m_clipboard;
+    std::unique_ptr<RdpAudio> m_audio;
 
     Codec m_codec = Codec::RemoteFx;
     RFX_CONTEXT* m_rfx = nullptr;
@@ -371,6 +385,11 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
         self->m_clipboard = Clipboard::create(self->compositor(), self->m_vcm);
         if (!self->m_clipboard)
             wlr_log(WLR_ERROR, "RDP: clipboard unavailable for %s", self->hostname());
+    }
+    if (!self->m_audio && WTSVirtualChannelManagerIsChannelJoined(self->m_vcm, RDPSND_CHANNEL_NAME)) {
+        self->m_audio = RdpAudio::create(self->compositor().event_loop(), self->m_vcm, self->compositor().locked());
+        if (!self->m_audio)
+            wlr_log(WLR_ERROR, "RDP: audio unavailable for %s", self->hostname());
     }
 
     // The cursor is composited into the frames; hide the client's own.
@@ -779,6 +798,9 @@ RdpServer::~RdpServer()
 {
     m_server.on_lock_changed = nullptr;
     m_peer.reset();
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    m_audio.reset();
+#endif
     m_dead_peers.clear();
     if (m_reaper)
         wl_event_source_remove(m_reaper);
@@ -808,6 +830,14 @@ bool RdpServer::listen()
         if (m_peer)
             m_peer->lock_changed(locked);
     };
+
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    // Optional: without PipeWire the desktop simply has no audio output.
+    m_audio = AudioSink::create(m_server.event_loop(), [this](std::span<const std::byte> samples) {
+        if (m_peer)
+            m_peer->push_audio(samples);
+    });
+#endif
 
     m_listener = freerdp_listener_new();
     if (!m_listener)
