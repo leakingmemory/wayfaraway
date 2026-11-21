@@ -28,6 +28,11 @@ on a lock screen.
   It locks, and applications keep running. The next connection, from any client,
   lands on the lock screen. A new connection while one is active takes over the
   session and locks it again.
+- **Clipboard.** Plain text is shared both ways over the cliprdr channel, with
+  line endings converted. Text copied on the desktop is cached, so it can still
+  be pasted on the client after the app that copied it exits. Nothing crosses
+  while the session is locked. A copy made on the client at the lock screen
+  takes effect on unlock.
 
 ## Dependencies
 
@@ -80,7 +85,8 @@ cmake --build build
 - Backpressure relies on RDP frame acknowledgement (at most 4 unacknowledged
   frames; damage is coalesced meanwhile). Clients without it are not throttled
   yet; socket write-blocking could cover them.
-- Clipboard (cliprdr), audio (rdpsnd) and lock-key synchronisation aren't
+- The clipboard is text-only: images, HTML, files and the primary selection
+  aren't bridged. Audio (rdpsnd) and lock-key synchronisation aren't
   implemented yet.
 - There's no rate limiting of unlock attempts beyond PAM's own fail delay.
 - Window state doesn't survive a compositor restart. Adding

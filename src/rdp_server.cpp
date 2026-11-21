@@ -5,6 +5,9 @@
 
 #include <linux/input-event-codes.h>
 
+#include <freerdp/channels/channels.h>
+#include <freerdp/channels/cliprdr.h>
+#include <freerdp/channels/wtsvc.h>
 #include <freerdp/codec/nsc.h>
 #include <freerdp/codec/rfx.h>
 #include <freerdp/constants.h>
@@ -18,6 +21,9 @@
 #include <winpr/input.h>
 #include <winpr/stream.h>
 #include <winpr/synch.h>
+#include <winpr/wtsapi.h>
+
+#include "clipboard.hpp"
 
 namespace wfa {
 
@@ -88,6 +94,8 @@ public:
     {
         detach();
         pixman_region32_fini(&m_pending);
+        if (m_vcm)
+            WTSCloseServer(m_vcm);
         if (m_client) {
             m_client->Disconnect(m_client);
             freerdp_peer_context_free(m_client);
@@ -119,6 +127,8 @@ public:
     // Stops processing events; the object is destroyed later.
     void detach()
     {
+        // Gives up the client's clipboard offer on the seat right away.
+        m_clipboard.reset();
         remove_sources(m_sources);
         if (m_ack_timer) {
             wl_event_source_remove(m_ack_timer);
@@ -131,6 +141,11 @@ public:
     void send_region(const pixman_region32_t* region);
     void send_full_frame();
     void output_resized();
+    void lock_changed(bool locked)
+    {
+        if (m_clipboard)
+            m_clipboard->set_locked(locked);
+    }
 
 private:
     bool choose_codec();
@@ -157,6 +172,7 @@ private:
     Server& compositor() const { return m_server.server(); }
 
     static int on_fd(int fd, uint32_t mask, void* data);
+    static int on_vcm(int fd, uint32_t mask, void* data);
 
     static BOOL on_post_connect(freerdp_peer* client);
     static BOOL on_activate(freerdp_peer* client);
@@ -172,6 +188,8 @@ private:
     RdpServer& m_server;
     freerdp_peer* m_client;
     std::vector<wl_event_source*> m_sources;
+    HANDLE m_vcm = nullptr;
+    std::unique_ptr<Clipboard> m_clipboard;
 
     Codec m_codec = Codec::RemoteFx;
     RFX_CONTEXT* m_rfx = nullptr;
@@ -279,7 +297,27 @@ bool RdpPeer::init()
         wlr_log(WLR_ERROR, "RDP: peer exposes no pollable handles");
         return false;
     }
+
+    // Virtual channels (clipboard). Routes the peer's channel data to it.
+    m_vcm = WTSOpenServerA(reinterpret_cast<LPSTR>(m_client->context));
+    if (!m_vcm) {
+        wlr_log(WLR_ERROR, "RDP: cannot create the virtual channel manager");
+        return false;
+    }
+    HANDLE vcm_handle = WTSVirtualChannelManagerGetEventHandle(m_vcm);
+    auto vcm_sources = watch_handles(compositor().event_loop(), &vcm_handle, 1, &RdpPeer::on_vcm, this);
+    m_sources.insert(m_sources.end(), vcm_sources.begin(), vcm_sources.end());
     return true;
+}
+
+int RdpPeer::on_vcm(int fd, uint32_t mask, void* data)
+{
+    auto* self = static_cast<RdpPeer*>(data);
+    if (!WTSVirtualChannelManagerCheckFileDescriptor(self->m_vcm)) {
+        wlr_log(WLR_INFO, "RDP: %s virtual channel failure", self->hostname());
+        self->m_server.peer_closed(self);
+    }
+    return 0;
 }
 
 int RdpPeer::on_fd(int fd, uint32_t mask, void* data)
@@ -328,6 +366,12 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
         return FALSE;
     if (self->m_nsc && !nsc_context_reset(self->m_nsc, width, height))
         return FALSE;
+
+    if (!self->m_clipboard && WTSVirtualChannelManagerIsChannelJoined(self->m_vcm, CLIPRDR_SVC_CHANNEL_NAME)) {
+        self->m_clipboard = Clipboard::create(self->compositor(), self->m_vcm);
+        if (!self->m_clipboard)
+            wlr_log(WLR_ERROR, "RDP: clipboard unavailable for %s", self->hostname());
+    }
 
     // The cursor is composited into the frames; hide the client's own.
     POINTER_SYSTEM_UPDATE pointer{};
@@ -733,6 +777,7 @@ RdpServer::RdpServer(Server& server)
 
 RdpServer::~RdpServer()
 {
+    m_server.on_lock_changed = nullptr;
     m_peer.reset();
     m_dead_peers.clear();
     if (m_reaper)
@@ -756,6 +801,13 @@ bool RdpServer::listen()
             config.tls_cert.c_str(), config.tls_key.c_str(), config.tls_key.c_str(), config.tls_cert.c_str());
         return false;
     }
+
+    // Required before any WTS virtual channel call.
+    WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());
+    m_server.on_lock_changed = [this](bool locked) {
+        if (m_peer)
+            m_peer->lock_changed(locked);
+    };
 
     m_listener = freerdp_listener_new();
     if (!m_listener)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <list>
 #include <memory>
 #include <set>
@@ -42,6 +43,8 @@ public:
     // --- Session -----------------------------------------------------------
     bool locked() const { return m_lock_screen->locked(); }
     void lock();
+    // Called whenever the session locks or unlocks.
+    std::function<void(bool locked)> on_lock_changed;
 
     // --- Output ------------------------------------------------------------
     void set_frame_sink(FrameSink* sink) { m_frame_sink = sink; }

@@ -179,11 +179,15 @@ void Server::lock()
     wlr_seat_keyboard_notify_clear_focus(m_seat);
     wlr_seat_pointer_notify_clear_focus(m_seat);
     wlr_cursor_set_xcursor(m_cursor, m_cursor_manager, "default");
+    if (on_lock_changed)
+        on_lock_changed(true);
 }
 
 void Server::on_unlocked()
 {
     wlr_scene_node_set_enabled(&m_desktop_tree->node, true);
+    if (on_lock_changed)
+        on_lock_changed(false);
     auto it = std::ranges::find_if(m_views, [](const auto& view) { return view->mapped(); });
     if (it != m_views.end())
         focus_view(it->get());

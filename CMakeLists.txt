@@ -33,6 +33,7 @@ add_executable(wayfaraway
     src/view.cpp
     src/lock_screen.cpp
     src/authenticator.cpp
+    src/clipboard.cpp
     src/rdp_server.cpp
 )
 
