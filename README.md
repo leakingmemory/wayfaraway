@@ -13,12 +13,21 @@ on a lock screen.
                           └── RemoteFX / NSCodec ◀── shadow framebuffer ◀── pixman render of the scene
 ```
 
-- **Headless backend + pixman renderer.** There is one virtual output. Its size
-  follows the RDP client's desktop size. Each frame is rendered on the CPU. Only
-  the damaged region is copied into a shadow buffer and encoded with RemoteFX.
+- **Headless backend + pixman renderer.** There is one virtual output per
+  client monitor, sized and arranged like the client's monitors. Each frame is
+  rendered on the CPU. Only the damaged region is copied into a shadow buffer
+  covering the whole desktop and encoded with RemoteFX.
   NSCodec is the fallback for clients without RemoteFX, or with a multifragment
   size too small for it; damage is split into tiles that fit the client's PDU
   limit.
+- **Multiple monitors.** With `/multimon`, each client monitor becomes its own
+  Wayland output, so apps see real monitors (for example for fullscreen or
+  `xdg-output`). The layout can change during a session through the Display
+  Control channel when the client window is resized or monitors come and go.
+  Outputs are reused across changes. New windows open on the monitor under the
+  pointer, maximize fills the window's own monitor, and windows left off-screen
+  move to the primary monitor. The lock screen is centred on the primary
+  monitor.
 - **Built-in lock screen.** The compositor draws the lock screen itself with
   cairo/pango; no client is involved. While the session is locked, the whole desktop
   scene tree is disabled and no client gets keyboard or pointer focus, so nothing
@@ -86,7 +95,7 @@ cmake --build build
    ssh -L 3389:localhost:3389 user@host
    ```
    Then connect any client that supports RemoteFX or NSCodec to `localhost`,
-   for example `xfreerdp /v:localhost /rfx /sound /microphone /cert:ignore`,
+   for example `xfreerdp /v:localhost /rfx /multimon /dynamic-resolution /sound /microphone /cert:ignore`,
    Remmina or mstsc. Pass `--address 0.0.0.0` to accept connections from the
    network directly. Audio needs a
    running PipeWire user session and a client with sound redirection enabled.

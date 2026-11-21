@@ -141,12 +141,13 @@ void LockScreen::lock()
     render();
 }
 
-void LockScreen::resize(int width, int height)
+void LockScreen::set_layout(int width, int height, wlr_box primary)
 {
-    if (width == m_width && height == m_height)
+    if (width == m_width && height == m_height && wlr_box_equal(&primary, &m_primary))
         return;
     m_width = width;
     m_height = height;
+    m_primary = primary;
     render();
 }
 
@@ -256,7 +257,7 @@ void LockScreen::render()
 
     const double w = m_width;
     const double h = m_height;
-    const double cx = w / 2.0;
+    const double cx = m_primary.x + m_primary.width / 2.0;
 
     cairo_pattern_t* bg = cairo_pattern_create_linear(0, 0, w, h);
     cairo_pattern_add_color_stop_rgb(bg, 0.0, 0.07, 0.09, 0.14);
@@ -269,7 +270,7 @@ void LockScreen::render()
     const Rgba muted{ 0.65, 0.68, 0.78 };
 
     m_rendered_clock = clock_text();
-    double y = h * 0.28;
+    double y = m_primary.y + m_primary.height * 0.28;
     y += draw_text(cr, m_rendered_clock, "Sans Light 96", cx, y, text);
     y += draw_text(cr, date_text(), "Sans 20", cx, y, muted);
 

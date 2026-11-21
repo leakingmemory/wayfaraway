@@ -43,6 +43,7 @@ add_executable(wayfaraway
     src/authenticator.cpp
     src/clipboard.cpp
     src/rdp_audio.cpp
+    src/rdp_display.cpp
     src/rdp_microphone.cpp
     src/rdp_server.cpp
 )

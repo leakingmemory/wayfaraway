@@ -31,7 +31,8 @@ public:
 
     bool listen();
 
-    void on_frame(const std::byte* pixels, int width, int height, std::size_t stride,
+    void on_layout(int width, int height) override;
+    void on_frame(const std::byte* pixels, int width, int height, std::size_t stride, int x, int y,
         const pixman_region32_t* damage) override;
 
     Server& server() const { return m_server; }

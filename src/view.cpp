@@ -27,7 +27,7 @@ View::View(Server& server, wlr_xdg_toplevel* toplevel)
         if (m_toplevel->base->initial_commit) {
             // Let the client pick its own size, but tell it how much room
             // there is.
-            const wlr_box box = m_server.output_box();
+            const wlr_box box = output_box();
             wlr_xdg_toplevel_set_bounds(m_toplevel, box.width, box.height);
             wlr_xdg_toplevel_set_size(m_toplevel, 0, 0);
         }
@@ -79,7 +79,7 @@ void View::toggle_maximized()
     const bool maximize = !m_toplevel->current.maximized;
     if (maximize) {
         m_saved_geometry = { m_x, m_y, m_toplevel->base->geometry.width, m_toplevel->base->geometry.height };
-        const wlr_box box = m_server.output_box();
+        const wlr_box box = output_box();
         move_to(box.x - m_toplevel->base->geometry.x, box.y - m_toplevel->base->geometry.y);
         wlr_xdg_toplevel_set_size(m_toplevel, box.width, box.height);
     } else {
@@ -89,12 +89,21 @@ void View::toggle_maximized()
     wlr_xdg_toplevel_set_maximized(m_toplevel, maximize);
 }
 
+wlr_box View::output_box() const
+{
+    wlr_cursor* cursor = m_server.cursor();
+    if (!m_mapped)
+        return m_server.output_box_at(cursor->x, cursor->y);
+    const wlr_box geometry = m_toplevel->base->geometry;
+    return m_server.output_box_at(m_x + geometry.x + geometry.width / 2.0, m_y + geometry.y + geometry.height / 2.0);
+}
+
 void View::fit_to_output()
 {
     if (!m_toplevel->base->initialized)
         return;
 
-    const wlr_box box = m_server.output_box();
+    const wlr_box box = output_box();
     wlr_xdg_toplevel_set_bounds(m_toplevel, box.width, box.height);
     if (m_toplevel->current.maximized) {
         move_to(box.x - m_toplevel->base->geometry.x, box.y - m_toplevel->base->geometry.y);

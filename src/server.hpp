@@ -5,6 +5,7 @@
 #include <list>
 #include <memory>
 #include <set>
+#include <vector>
 
 #include "authenticator.hpp"
 #include "config.hpp"
@@ -17,12 +18,27 @@ namespace wfa {
 class View;
 class RdpServer;
 
-// Receives every rendered frame of the virtual output.
+// One monitor of the desktop, in desktop coordinates.
+struct Monitor {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    bool primary = false;
+
+    bool operator==(const Monitor&) const = default;
+};
+
+// Receives every rendered frame of every virtual output.
 class FrameSink {
 public:
     virtual ~FrameSink() = default;
-    // `damage` is in buffer coordinates. Pixels are XRGB8888.
-    virtual void on_frame(const std::byte* pixels, int width, int height, std::size_t stride,
+    // The desktop (the bounding box of all outputs, starting at 0,0) was
+    // resized or rearranged. Every output re-renders in full afterwards.
+    virtual void on_layout(int width, int height) = 0;
+    // A frame of the output at (x, y) on the desktop. `damage` is in buffer
+    // coordinates. Pixels are XRGB8888.
+    virtual void on_frame(const std::byte* pixels, int width, int height, std::size_t stride, int x, int y,
         const pixman_region32_t* damage) = 0;
 };
 
@@ -46,11 +62,15 @@ public:
     // Called whenever the session locks or unlocks.
     std::function<void(bool locked)> on_lock_changed;
 
-    // --- Output ------------------------------------------------------------
+    // --- Outputs -----------------------------------------------------------
     void set_frame_sink(FrameSink* sink) { m_frame_sink = sink; }
-    void resize_output(int width, int height);
-    int output_width() const { return m_output->width; }
-    int output_height() const { return m_output->height; }
+    // Replaces the virtual outputs with one per monitor, reusing existing
+    // ones. Coordinates may be negative; they are normalised so the desktop
+    // starts at (0, 0). Returns the layout actually applied.
+    std::vector<Monitor> set_monitor_layout(std::vector<Monitor> monitors);
+    const std::vector<Monitor>& monitors() const { return m_monitors; }
+    int desktop_width() const { return m_desktop.width; }
+    int desktop_height() const { return m_desktop.height; }
 
     // --- Input injection (used by the RDP server) --------------------------
     void inject_key(std::uint32_t evdev_keycode, bool pressed);
@@ -67,7 +87,9 @@ public:
     wlr_scene_tree* desktop_tree() const { return m_desktop_tree; }
     wlr_seat* seat() const { return m_seat; }
     wlr_cursor* cursor() const { return m_cursor; }
-    wlr_box output_box() const { return { 0, 0, m_output->width, m_output->height }; }
+    // The box of the output containing (or closest to) a desktop point.
+    wlr_box output_box_at(double lx, double ly) const;
+    wlr_box primary_box() const;
 
     void focus_view(View* view);
     void begin_interactive(View* view, bool resize, std::uint32_t edges);
@@ -80,9 +102,17 @@ public:
 private:
     enum class CursorMode { Passthrough, Move, Resize };
 
+    struct Output {
+        wlr_output* output = nullptr;
+        wlr_scene_output* scene_output = nullptr;
+        Listener frame;
+        Listener destroy;
+    };
+
     void create_output(wlr_output* output);
-    void output_resized();
-    void render_frame();
+    void configure_output(Output& output, const Monitor& monitor);
+    void layout_changed();
+    void render_frame(Output& output);
 
     void setup_keyboard();
     void on_key(const wlr_keyboard_key_event& event);
@@ -114,8 +144,12 @@ private:
     wlr_cursor* m_cursor = nullptr;
     wlr_xcursor_manager* m_cursor_manager = nullptr;
 
-    wlr_output* m_output = nullptr;
-    wlr_scene_output* m_scene_output = nullptr;
+    // Same order as m_monitors; the primary monitor comes first.
+    std::vector<std::unique_ptr<Output>> m_outputs;
+    std::vector<Monitor> m_monitors;
+    wlr_box m_desktop{};
+    // Monitor being created by wlr_headless_add_output (see create_output).
+    Monitor m_pending_monitor;
 
     // Scene layers, bottom to top.
     wlr_scene_rect* m_background = nullptr;
@@ -140,9 +174,6 @@ private:
     std::uint32_t m_resize_edges = 0;
 
     Listener m_new_output;
-    Listener m_output_frame;
-    Listener m_output_request_state;
-    Listener m_output_destroy;
     Listener m_new_toplevel;
     Listener m_new_popup;
     Listener m_keyboard_key;

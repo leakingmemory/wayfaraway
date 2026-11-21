@@ -17,6 +17,7 @@
 #include <freerdp/constants.h>
 #include <freerdp/crypto/certificate.h>
 #include <freerdp/crypto/privatekey.h>
+#include <freerdp/display.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 #include <freerdp/peer.h>
@@ -32,6 +33,7 @@
 #include "clipboard.hpp"
 #include "pipewire.hpp"
 #include "rdp_audio.hpp"
+#include "rdp_display.hpp"
 #include "rdp_microphone.hpp"
 
 namespace wfa {
@@ -140,6 +142,8 @@ public:
         m_clipboard.reset();
         m_audio.reset();
         m_microphone.reset(); // joins FreeRDP's audin thread
+        m_display.reset(); // joins FreeRDP's disp thread
+        m_closed = true;
         remove_sources(m_sources);
         if (m_ack_timer) {
             wl_event_source_remove(m_ack_timer);
@@ -195,8 +199,25 @@ private:
     void update_microphone()
     {
         if (m_microphone)
-            m_microphone->set_open(m_microphone_demand && !compositor().locked());
+            m_microphone->set_open(m_dynamic_ready && m_microphone_demand && !compositor().locked());
     }
+
+    // Dynamic channels (audin, disp) can only be opened once drdynvc has
+    // finished negotiating, which happens some time after activation.
+    void poll_dynamic_channels()
+    {
+        if (m_closed || m_dynamic_ready || !m_vcm
+            || WTSVirtualChannelManagerGetDrdynvcState(m_vcm) != DRDYNVC_STATE_READY)
+            return;
+        m_dynamic_ready = true;
+        if (m_display)
+            m_display->open();
+        update_microphone();
+    }
+
+    // Tells the client about our monitor layout (in its coordinates, where
+    // the primary monitor's top-left is the origin).
+    void store_monitor_layout(const std::vector<Monitor>& monitors);
 
     bool choose_codec();
     UINT32 frames_in_flight() const { return m_frame_id - m_last_acked; }
@@ -243,6 +264,11 @@ private:
     std::unique_ptr<RdpAudio> m_audio;
     std::unique_ptr<RdpMicrophone> m_microphone;
     bool m_microphone_demand = false;
+    std::unique_ptr<RdpDisplayControl> m_display;
+    bool m_dynamic_ready = false;
+    bool m_closed = false;
+    // The layout the client was last told about.
+    std::vector<Monitor> m_sent_monitors;
     // Lock-key state the client is known to have (KBD_SYNC_* flags).
     std::optional<UINT32> m_client_leds;
 
@@ -315,6 +341,10 @@ bool RdpPeer::init()
         && freerdp_settings_set_bool(s, FreeRDP_HasExtendedMouseEvent, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_HasHorizontalWheel, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_UnicodeInput, FALSE)
+        // Accept the client's monitor layout and let it change at runtime.
+        && freerdp_settings_set_bool(s, FreeRDP_UseMultimon, TRUE)
+        && freerdp_settings_set_bool(s, FreeRDP_SupportMonitorLayoutPdu, TRUE)
+        && freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, TRUE)
         && freerdp_settings_set_uint32(s, FreeRDP_MultifragMaxRequestSize, 0xFFFFFF)
         && freerdp_settings_set_uint32(s, FreeRDP_FrameAcknowledge, default_frames_in_flight);
     if (!ok) {
@@ -371,7 +401,9 @@ int RdpPeer::on_vcm(int fd, uint32_t mask, void* data)
     if (!WTSVirtualChannelManagerCheckFileDescriptor(self->m_vcm)) {
         wlr_log(WLR_INFO, "RDP: %s virtual channel failure", self->hostname());
         self->m_server.peer_closed(self);
+        return 0;
     }
+    self->poll_dynamic_channels();
     return 0;
 }
 
@@ -381,7 +413,10 @@ int RdpPeer::on_fd(int fd, uint32_t mask, void* data)
     if (!self->m_client->CheckFileDescriptor(self->m_client)) {
         wlr_log(WLR_INFO, "RDP: %s disconnected", self->hostname());
         self->m_server.peer_closed(self);
+        return 0;
     }
+    // drdynvc negotiation arrives as ordinary channel data.
+    self->poll_dynamic_channels();
     return 0;
 }
 
@@ -395,19 +430,50 @@ BOOL RdpPeer::on_post_connect(freerdp_peer* client)
 
     const auto width = static_cast<int>(freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth));
     const auto height = static_cast<int>(freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight));
-    wlr_log(WLR_INFO, "RDP: %s connected, desktop %dx%d, %s", self->hostname(), width, height,
-        codec_name(self->m_codec));
 
-    // The client's window decides the output size.
-    self->compositor().resize_output(std::clamp(width, 320, 8192), std::clamp(height, 240, 8192));
-
-    const int out_w = self->compositor().output_width();
-    const int out_h = self->compositor().output_height();
-    if (out_w != width || out_h != height) {
-        (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, static_cast<UINT32>(out_w));
-        (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, static_cast<UINT32>(out_h));
+    // The client's monitors (with /multimon) or its window decide the
+    // outputs. RDP monitor coordinates have the primary at the origin;
+    // set_monitor_layout normalises them to desktop coordinates.
+    std::vector<Monitor> requested;
+    const UINT32 count = freerdp_settings_get_uint32(s, FreeRDP_MonitorCount);
+    for (UINT32 i = 0; i < count; ++i) {
+        const auto* m = static_cast<const rdpMonitor*>(freerdp_settings_get_pointer_array(s, FreeRDP_MonitorDefArray, i));
+        if (m)
+            requested.push_back({ m->x, m->y, m->width, m->height, m->is_primary != 0 });
     }
+    if (requested.empty())
+        requested.push_back({ 0, 0, width, height, true });
+
+    wlr_log(WLR_INFO, "RDP: %s connected, desktop %dx%d on %zu monitor(s), %s", self->hostname(), width, height,
+        requested.size(), codec_name(self->m_codec));
+
+    const std::vector<Monitor> applied = self->compositor().set_monitor_layout(std::move(requested));
+    self->store_monitor_layout(applied);
     return TRUE;
+}
+
+void RdpPeer::store_monitor_layout(const std::vector<Monitor>& monitors)
+{
+    rdpSettings* s = settings();
+    const Monitor& primary = monitors.front();
+
+    (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, static_cast<UINT32>(compositor().desktop_width()));
+    (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, static_cast<UINT32>(compositor().desktop_height()));
+
+    if (freerdp_settings_set_pointer_len(s, FreeRDP_MonitorDefArray, nullptr, monitors.size())) {
+        for (std::size_t i = 0; i < monitors.size(); ++i) {
+            const Monitor& m = monitors[i];
+            rdpMonitor monitor{};
+            monitor.x = m.x - primary.x;
+            monitor.y = m.y - primary.y;
+            monitor.width = m.width;
+            monitor.height = m.height;
+            monitor.is_primary = m.primary ? 1 : 0;
+            (void)freerdp_settings_set_pointer_array(s, FreeRDP_MonitorDefArray, i, &monitor);
+        }
+        (void)freerdp_settings_set_uint32(s, FreeRDP_MonitorCount, static_cast<UINT32>(monitors.size()));
+    }
+    m_sent_monitors = monitors;
 }
 
 BOOL RdpPeer::on_activate(freerdp_peer* client)
@@ -441,6 +507,17 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
             wlr_log(WLR_ERROR, "RDP: microphone unavailable for %s", self->hostname());
     }
     self->set_microphone_demand(self->m_server.microphone_wanted());
+    if (!self->m_display && WTSVirtualChannelManagerIsChannelJoined(self->m_vcm, DRDYNVC_SVC_CHANNEL_NAME)) {
+        self->m_display = RdpDisplayControl::create(self->compositor().event_loop(), self->m_vcm, client->context,
+            [self](std::vector<Monitor> monitors) {
+                // Resizes and rearranges the outputs; output_resized() then
+                // tells the client.
+                self->compositor().set_monitor_layout(std::move(monitors));
+            });
+        if (!self->m_display)
+            wlr_log(WLR_ERROR, "RDP: display control unavailable for %s", self->hostname());
+    }
+    self->poll_dynamic_channels();
 
     // The cursor is composited into the frames; hide the client's own.
     POINTER_SYSTEM_UPDATE pointer{};
@@ -472,8 +549,9 @@ void RdpPeer::output_resized()
     rdpSettings* s = settings();
     const auto width = static_cast<UINT32>(m_server.width());
     const auto height = static_cast<UINT32>(m_server.height());
+    const std::vector<Monitor>& monitors = compositor().monitors();
     if (freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth) == width
-        && freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight) == height)
+        && freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight) == height && monitors == m_sent_monitors)
         return;
 
     if (!freerdp_settings_get_bool(s, FreeRDP_DesktopResize)) {
@@ -482,10 +560,28 @@ void RdpPeer::output_resized()
         return;
     }
 
+    store_monitor_layout(monitors);
+
+    // Say how the new desktop splits into monitors before the resize, so
+    // the client lays it out correctly on reactivation.
+    if (freerdp_settings_get_bool(s, FreeRDP_SupportMonitorLayoutPdu)) {
+        const Monitor& primary = monitors.front();
+        std::vector<MONITOR_DEF> defs;
+        for (const Monitor& m : monitors) {
+            defs.push_back(MONITOR_DEF{
+                .left = m.x - primary.x,
+                .top = m.y - primary.y,
+                .right = m.x - primary.x + m.width - 1,
+                .bottom = m.y - primary.y + m.height - 1,
+                .flags = m.primary ? MONITOR_PRIMARY : 0u,
+            });
+        }
+        if (!freerdp_display_send_monitor_layout(m_client->context, static_cast<UINT32>(defs.size()), defs.data()))
+            wlr_log(WLR_ERROR, "RDP: failed to send the monitor layout");
+    }
+
     // The client re-runs activation after a desktop resize.
     m_active = false;
-    (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, width);
-    (void)freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, height);
     (void)update()->DesktopResize(m_client->context);
 }
 
@@ -1005,39 +1101,45 @@ void RdpServer::on_reap(void* data)
     self->m_dead_peers.clear();
 }
 
-void RdpServer::on_frame(const std::byte* pixels, int width, int height, std::size_t stride,
+void RdpServer::on_layout(int width, int height)
+{
+    // Start from black: gaps between monitors stay black, and every output
+    // repaints itself in full right after this.
+    m_width = width;
+    m_height = height;
+    m_stride = static_cast<std::size_t>(width) * 4;
+    m_shadow.assign(m_stride * static_cast<std::size_t>(height), std::byte{});
+
+    if (m_peer)
+        m_peer->output_resized();
+}
+
+void RdpServer::on_frame(const std::byte* pixels, int width, int height, std::size_t stride, int x, int y,
     const pixman_region32_t* damage)
 {
-    const bool resized = width != m_width || height != m_height;
-    if (resized) {
-        m_width = width;
-        m_height = height;
-        m_stride = static_cast<std::size_t>(width) * 4;
-        m_shadow.assign(m_stride * static_cast<std::size_t>(height), std::byte{});
-    }
-
+    // Damage within this output's buffer, clipped to the part of the desktop
+    // the shadow covers.
     pixman_region32_t region;
     pixman_region32_init(&region);
-    if (resized)
-        pixman_region32_init_rect(&region, 0, 0, static_cast<unsigned>(width), static_cast<unsigned>(height));
-    else
-        pixman_region32_intersect_rect(&region, damage, 0, 0, static_cast<unsigned>(width), static_cast<unsigned>(height));
+    pixman_region32_intersect_rect(&region, damage, 0, 0, static_cast<unsigned>(width), static_cast<unsigned>(height));
+    pixman_region32_intersect_rect(&region, &region, -x, -y, static_cast<unsigned>(m_width),
+        static_cast<unsigned>(m_height));
 
     int count = 0;
     const pixman_box32_t* boxes = pixman_region32_rectangles(&region, &count);
     for (int i = 0; i < count; ++i) {
         const std::size_t bytes = static_cast<std::size_t>(boxes[i].x2 - boxes[i].x1) * 4;
-        for (int y = boxes[i].y1; y < boxes[i].y2; ++y) {
-            std::memcpy(m_shadow.data() + y * m_stride + boxes[i].x1 * 4,
-                pixels + y * stride + boxes[i].x1 * 4, bytes);
+        for (int row = boxes[i].y1; row < boxes[i].y2; ++row) {
+            std::memcpy(m_shadow.data() + static_cast<std::size_t>(y + row) * m_stride
+                    + static_cast<std::size_t>(x + boxes[i].x1) * 4,
+                pixels + static_cast<std::size_t>(row) * stride + static_cast<std::size_t>(boxes[i].x1) * 4, bytes);
         }
     }
 
     if (m_peer) {
-        if (resized)
-            m_peer->output_resized();
-        if (m_peer)
-            m_peer->send_region(&region);
+        // To desktop coordinates.
+        pixman_region32_translate(&region, x, y);
+        m_peer->send_region(&region);
     }
     pixman_region32_fini(&region);
 }

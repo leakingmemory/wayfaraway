@@ -25,7 +25,9 @@ public:
     bool locked() const { return m_locked; }
     void lock();
 
-    void resize(int width, int height);
+    // The background covers the whole desktop; the clock and password field
+    // are centred on the primary monitor, so they never straddle a bezel.
+    void set_layout(int width, int height, wlr_box primary);
 
     // Feeds one key press while locked. `utf8` is the text the key produces
     // under the current xkb state (empty for non-printing keys).
@@ -50,6 +52,7 @@ private:
 
     int m_width = 0;
     int m_height = 0;
+    wlr_box m_primary{};
     bool m_locked = true;
     // Bumped on every lock() so an authentication started before a re-lock
     // (e.g. an RDP takeover) can never unlock the new session.

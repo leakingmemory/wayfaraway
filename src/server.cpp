@@ -141,10 +141,15 @@ bool Server::start()
         wlr_log(WLR_ERROR, "Unable to start the headless backend");
         return false;
     }
-    if (!wlr_headless_add_output(m_backend, m_config.width, m_config.height) || !m_output) {
+    // One output until an RDP client says how many monitors it has.
+    set_monitor_layout({ { 0, 0, m_config.width, m_config.height, true } });
+    if (m_outputs.empty()) {
         wlr_log(WLR_ERROR, "Unable to create the virtual output");
         return false;
     }
+    wlr_cursor_set_xcursor(m_cursor, m_cursor_manager, "default");
+    const wlr_box primary = primary_box();
+    wlr_cursor_warp_closest(m_cursor, nullptr, primary.x + primary.width / 2.0, primary.y + primary.height / 2.0);
 
     if (!m_rdp->listen())
         return false;
@@ -194,107 +199,209 @@ void Server::on_unlocked()
     process_cursor_motion(0);
 }
 
-void Server::create_output(wlr_output* output)
+void Server::create_output(wlr_output* wlr_output)
 {
-    if (m_output) {
-        wlr_log(WLR_ERROR, "Ignoring extra output %s", output->name);
-        return;
-    }
+    // Only outputs we asked for exist (headless backend); the monitor they
+    // stand for was stashed by set_monitor_layout.
+    const Monitor monitor = m_pending_monitor;
 
-    wlr_output_init_render(output, m_allocator, m_renderer);
+    wlr_output_init_render(wlr_output, m_allocator, m_renderer);
 
     wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
-    wlr_output_state_set_custom_mode(&state, m_config.width, m_config.height, 0);
-    wlr_output_commit_state(output, &state);
+    wlr_output_state_set_custom_mode(&state, monitor.width, monitor.height, 0);
+    wlr_output_commit_state(wlr_output, &state);
     wlr_output_state_finish(&state);
 
-    m_output = output;
-
-    m_output_frame.connect(&output->events.frame, [this](void*) { render_frame(); });
-    m_output_request_state.connect(&output->events.request_state, [this](void* data) {
-        auto* event = static_cast<wlr_output_event_request_state*>(data);
-        wlr_output_commit_state(m_output, event->state);
-        output_resized();
-    });
-    m_output_destroy.connect(&output->events.destroy, [this](void*) {
-        m_output_frame.disconnect();
-        m_output_request_state.disconnect();
-        m_output_destroy.disconnect();
-        m_output = nullptr;
-        m_scene_output = nullptr;
+    auto output = std::make_unique<Output>();
+    Output* raw = output.get();
+    raw->output = wlr_output;
+    raw->frame.connect(&wlr_output->events.frame, [this, raw](void*) { render_frame(*raw); });
+    raw->destroy.connect(&wlr_output->events.destroy, [this, raw](void*) {
+        // Deletes `raw`, including the listener running this.
+        std::erase_if(m_outputs, [raw](const auto& o) { return o.get() == raw; });
     });
 
-    wlr_output_layout_output* layout_output = wlr_output_layout_add_auto(m_output_layout, output);
-    m_scene_output = wlr_scene_output_create(m_scene, output);
-    wlr_scene_output_layout_add_output(m_scene_layout, layout_output, m_scene_output);
+    wlr_output_layout_output* layout_output = wlr_output_layout_add(m_output_layout, wlr_output, monitor.x, monitor.y);
+    raw->scene_output = wlr_scene_output_create(m_scene, wlr_output);
+    wlr_scene_output_layout_add_output(m_scene_layout, layout_output, raw->scene_output);
 
-    wlr_cursor_set_xcursor(m_cursor, m_cursor_manager, "default");
-    wlr_cursor_warp_closest(m_cursor, nullptr, output->width / 2.0, output->height / 2.0);
-
-    output_resized();
+    m_outputs.push_back(std::move(output));
 }
 
-void Server::resize_output(int width, int height)
+void Server::configure_output(Output& output, const Monitor& monitor)
 {
-    if (!m_output || (width == m_output->width && height == m_output->height))
-        return;
-
-    wlr_output_state state;
-    wlr_output_state_init(&state);
-    wlr_output_state_set_custom_mode(&state, width, height, 0);
-    if (!wlr_output_commit_state(m_output, &state))
-        wlr_log(WLR_ERROR, "Failed to resize output to %dx%d", width, height);
-    wlr_output_state_finish(&state);
-
-    output_resized();
+    if (output.output->width != monitor.width || output.output->height != monitor.height) {
+        wlr_output_state state;
+        wlr_output_state_init(&state);
+        wlr_output_state_set_custom_mode(&state, monitor.width, monitor.height, 0);
+        if (!wlr_output_commit_state(output.output, &state))
+            wlr_log(WLR_ERROR, "Failed to resize %s to %dx%d", output.output->name, monitor.width, monitor.height);
+        wlr_output_state_finish(&state);
+    }
+    // Moves the output if it is already in the layout.
+    wlr_output_layout_add(m_output_layout, output.output, monitor.x, monitor.y);
 }
 
-void Server::output_resized()
+std::vector<Monitor> Server::set_monitor_layout(std::vector<Monitor> monitors)
 {
-    wlr_log(WLR_INFO, "Output is %dx%d", m_output->width, m_output->height);
-    wlr_scene_rect_set_size(m_background, m_output->width, m_output->height);
-    m_lock_screen->resize(m_output->width, m_output->height);
-    for (auto& view : m_views)
+    constexpr std::size_t max_monitors = 16;
+    constexpr int min_size = 200;
+    constexpr int max_size = 8192;
+
+    if (monitors.empty())
+        monitors.push_back({ 0, 0, m_config.width, m_config.height, true });
+    if (monitors.size() > max_monitors)
+        monitors.resize(max_monitors);
+
+    for (auto& m : monitors) {
+        m.width = std::clamp(m.width, min_size, max_size);
+        m.height = std::clamp(m.height, min_size, max_size);
+    }
+
+    // Exactly one primary, and it comes first.
+    auto primary = std::ranges::find_if(monitors, &Monitor::primary);
+    if (primary == monitors.end())
+        primary = monitors.begin();
+    std::rotate(monitors.begin(), primary, primary + 1);
+    for (std::size_t i = 0; i < monitors.size(); ++i)
+        monitors[i].primary = i == 0;
+
+    // Normalise so the desktop's top-left is (0, 0).
+    const int min_x = std::ranges::min(monitors, {}, &Monitor::x).x;
+    const int min_y = std::ranges::min(monitors, {}, &Monitor::y).y;
+    int max_x = 0, max_y = 0;
+    for (auto& m : monitors) {
+        m.x -= min_x;
+        m.y -= min_y;
+        max_x = std::max(max_x, m.x + m.width);
+        max_y = std::max(max_y, m.y + m.height);
+    }
+    if (max_x > max_size || max_y > max_size) {
+        wlr_log(WLR_ERROR, "Monitor layout %dx%d exceeds %dx%d; using the primary monitor only", max_x, max_y,
+            max_size, max_size);
+        monitors.resize(1);
+        monitors[0].x = monitors[0].y = 0;
+    }
+
+    if (monitors == m_monitors && m_outputs.size() == monitors.size())
+        return m_monitors;
+
+    // Reuse existing outputs (keeping windows where they are), then add or
+    // remove the difference.
+    for (std::size_t i = 0; i < monitors.size(); ++i) {
+        if (i < m_outputs.size()) {
+            configure_output(*m_outputs[i], monitors[i]);
+        } else {
+            m_pending_monitor = monitors[i];
+            if (!wlr_headless_add_output(m_backend, monitors[i].width, monitors[i].height))
+                wlr_log(WLR_ERROR, "Unable to create a virtual output");
+        }
+    }
+    while (m_outputs.size() > monitors.size())
+        wlr_output_destroy(m_outputs.back()->output); // erased by its destroy listener
+
+    m_monitors = std::move(monitors);
+    layout_changed();
+    return m_monitors;
+}
+
+void Server::layout_changed()
+{
+    wlr_output_layout_get_box(m_output_layout, nullptr, &m_desktop);
+    for (const auto& m : m_monitors)
+        wlr_log(WLR_INFO, "Output %dx%d at %d,%d%s", m.width, m.height, m.x, m.y, m.primary ? " (primary)" : "");
+    wlr_log(WLR_INFO, "Desktop is %dx%d", m_desktop.width, m_desktop.height);
+
+    wlr_scene_rect_set_size(m_background, m_desktop.width, m_desktop.height);
+    m_lock_screen->set_layout(m_desktop.width, m_desktop.height, primary_box());
+    if (m_frame_sink)
+        m_frame_sink->on_layout(m_desktop.width, m_desktop.height);
+
+    // The sink starts from a blank desktop, so repaint every output in full.
+    for (auto& output : m_outputs) {
+        wlr_damage_ring_add_whole(&output->scene_output->damage_ring);
+        wlr_output_schedule_frame(output->output);
+    }
+
+    // Windows left outside every output move to the primary one; maximized
+    // windows follow the size of theirs.
+    const wlr_box primary = primary_box();
+    for (auto& view : m_views) {
+        if (!view->mapped())
+            continue;
+        const wlr_box geometry = view->toplevel()->base->geometry;
+        const wlr_box box{ view->x() + geometry.x, view->y() + geometry.y, geometry.width, geometry.height };
+        if (!wlr_output_layout_intersects(m_output_layout, nullptr, &box)) {
+            view->move_to(primary.x + std::max(0, (primary.width - geometry.width) / 2) - geometry.x,
+                primary.y + std::max(0, (primary.height - geometry.height) / 2) - geometry.y);
+        }
         view->fit_to_output();
+    }
+
+    // Keep the pointer on the desktop.
+    wlr_cursor_warp_closest(m_cursor, nullptr, m_cursor->x, m_cursor->y);
 }
 
-void Server::render_frame()
+wlr_box Server::output_box_at(double lx, double ly) const
 {
-    if (!m_scene_output)
-        return;
+    wlr_output* output = wlr_output_layout_output_at(m_output_layout, lx, ly);
+    if (!output) {
+        double cx = 0, cy = 0;
+        wlr_output_layout_closest_point(m_output_layout, nullptr, lx, ly, &cx, &cy);
+        output = wlr_output_layout_output_at(m_output_layout, cx, cy);
+    }
+    if (!output)
+        return primary_box();
+    wlr_box box{};
+    wlr_output_layout_get_box(m_output_layout, output, &box);
+    return box;
+}
 
+wlr_box Server::primary_box() const
+{
+    if (m_monitors.empty())
+        return { 0, 0, m_config.width, m_config.height };
+    const Monitor& m = m_monitors.front();
+    return { m.x, m.y, m.width, m.height };
+}
+
+void Server::render_frame(Output& output)
+{
     wlr_output_state state;
     wlr_output_state_init(&state);
 
-    if (wlr_scene_output_build_state(m_scene_output, &state, nullptr)) {
+    if (wlr_scene_output_build_state(output.scene_output, &state, nullptr)) {
         if (m_frame_sink && (state.committed & WLR_OUTPUT_STATE_BUFFER) && state.buffer) {
             void* data = nullptr;
             std::uint32_t format = 0;
             std::size_t stride = 0;
             if (wlr_buffer_begin_data_ptr_access(state.buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
                 pixman_region32_t damage;
-                pixman_region32_init(&damage);
-                if (state.committed & WLR_OUTPUT_STATE_DAMAGE)
+                if (state.committed & WLR_OUTPUT_STATE_DAMAGE) {
+                    pixman_region32_init(&damage);
                     pixman_region32_copy(&damage, &state.damage);
-                else
+                } else {
                     pixman_region32_init_rect(&damage, 0, 0, state.buffer->width, state.buffer->height);
+                }
 
+                wlr_box box{};
+                wlr_output_layout_get_box(m_output_layout, output.output, &box);
                 m_frame_sink->on_frame(static_cast<const std::byte*>(data), state.buffer->width,
-                    state.buffer->height, stride, &damage);
+                    state.buffer->height, stride, box.x, box.y, &damage);
 
                 pixman_region32_fini(&damage);
                 wlr_buffer_end_data_ptr_access(state.buffer);
             }
         }
-        wlr_output_commit_state(m_output, &state);
+        wlr_output_commit_state(output.output, &state);
     }
     wlr_output_state_finish(&state);
 
     timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    wlr_scene_output_send_frame_done(m_scene_output, &now);
+    wlr_scene_output_send_frame_done(output.scene_output, &now);
 }
 
 void Server::spawn(const std::string& command) const
@@ -350,12 +457,14 @@ void Server::focus_view(View* view)
 
 void Server::view_mapped(View* view)
 {
-    // Centre new windows, cascading so they do not stack exactly.
+    // Centre new windows on the monitor under the pointer, cascading so they
+    // do not stack exactly.
     const wlr_box geometry = view->toplevel()->base->geometry;
+    const wlr_box output = output_box_at(m_cursor->x, m_cursor->y);
     const int mapped = static_cast<int>(std::ranges::count_if(m_views, [](const auto& v) { return v->mapped(); }));
     const int offset = ((mapped - 1) % 8) * 32;
-    view->move_to(std::max(0, (output_box().width - geometry.width) / 2 + offset),
-        std::max(0, (output_box().height - geometry.height) / 2 + offset));
+    view->move_to(output.x + std::max(0, (output.width - geometry.width) / 2 + offset) - geometry.x,
+        output.y + std::max(0, (output.height - geometry.height) / 2 + offset) - geometry.y);
     focus_view(view);
 }
 

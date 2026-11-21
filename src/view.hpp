@@ -33,6 +33,9 @@ public:
 
 private:
     void toggle_maximized();
+    // The monitor this view is on: the one containing its centre, or, before
+    // it is mapped, the one under the pointer (where it will be placed).
+    wlr_box output_box() const;
 
     Server& m_server;
     wlr_xdg_toplevel* m_toplevel;
