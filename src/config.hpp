@@ -9,7 +9,9 @@
 namespace wfa {
 
 struct Config {
-    std::string rdp_address = "0.0.0.0";
+    // Loopback only by default: reach it through an SSH tunnel, or pass
+    // --address 0.0.0.0 to expose it on the network.
+    std::string rdp_address = "127.0.0.1";
     std::uint16_t rdp_port = 3389;
     std::filesystem::path tls_cert;
     std::filesystem::path tls_key;

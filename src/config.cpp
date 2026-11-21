@@ -16,7 +16,8 @@ Headless Wayland compositor, served over RDP. The desktop always starts
 locked; unlock it with the password of the user running the compositor.
 
 Options:
-  -a, --address ADDR      RDP listen address (default: 0.0.0.0)
+  -a, --address ADDR      RDP listen address (default: 127.0.0.1;
+                          use 0.0.0.0 to accept remote connections)
   -p, --port PORT         RDP listen port (default: 3389)
       --cert FILE         TLS certificate (default: $CONFIG/tls.crt)
       --key FILE          TLS private key (default: $CONFIG/tls.key)

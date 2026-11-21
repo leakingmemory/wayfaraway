@@ -77,8 +77,15 @@ cmake --build build
    ./build/wayfaraway --startup 'foot'
    ```
    You can also use the systemd user unit in `data/wayfaraway.service`.
-   Connect with any client that supports RemoteFX or NSCodec, for example
-   `xfreerdp /v:host /rfx /sound /microphone /cert:ignore`, Remmina or mstsc. Audio needs a
+   By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
+   it over SSH:
+   ```sh
+   ssh -L 3389:localhost:3389 user@host
+   ```
+   Then connect any client that supports RemoteFX or NSCodec to `localhost`,
+   for example `xfreerdp /v:localhost /rfx /sound /microphone /cert:ignore`,
+   Remmina or mstsc. Pass `--address 0.0.0.0` to accept connections from the
+   network directly. Audio needs a
    running PipeWire user session and a client with sound redirection enabled.
 
 ## Keys
