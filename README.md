@@ -107,7 +107,20 @@ cmake --build build
    ```sh
    ./build/wayfaraway --startup 'foot'
    ```
-   You can also use the systemd user unit in `data/wayfaraway.service`.
+   Or run it as a systemd user service. On Linux, `cmake --install` installs
+   `wayfaraway.service` into the systemd user unit directory (turn this off
+   with `-DWAYFARAWAY_SYSTEMD=OFF`). The directory comes from `systemd.pc`
+   under the install prefix, or you can set it with
+   `-DWAYFARAWAY_SYSTEMD_USER_UNIT_DIR=...`. Then, as the user:
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now wayfaraway
+   systemctl --user edit wayfaraway   # to add --startup, --address, ...
+   loginctl enable-linger "$USER"     # keep it running without a login
+   ```
+   Without lingering, the service only runs while you have a local login or
+   SSH session. To pass options, override `ExecStart` in the drop-in: an
+   empty `ExecStart=` line, then the new one.
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh

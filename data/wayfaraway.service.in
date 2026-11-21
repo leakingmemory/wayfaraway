@@ -1,9 +1,11 @@
 [Unit]
 Description=wayfaraway headless Wayland desktop (RDP)
-After=network-online.target
+# Audio is optional, so these only order the start, they don't pull it in.
+After=pipewire.service wireplumber.service
 
 [Service]
 Type=simple
+# Add --address, --startup and the like with: systemctl --user edit wayfaraway
 ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway
 Restart=on-failure
 

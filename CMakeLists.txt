@@ -96,14 +96,39 @@ target_link_libraries(wayfaraway PRIVATE
 # absolute path rather than one under CMAKE_INSTALL_SYSCONFDIR (which would
 # give /usr/etc or /usr/local/etc). DESTDIR is still honoured for packaging.
 set(WAYFARAWAY_PAM_DIR "/etc/pam.d" CACHE PATH "Directory to install the PAM service file into")
-set(WAYFARAWAY_SYSTEMD_USER_UNIT_DIR "${CMAKE_INSTALL_PREFIX}/lib/systemd/user"
-    CACHE PATH "Directory to install the systemd user unit into")
 
-configure_file(data/wayfaraway.service.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service @ONLY)
+# A systemd user unit, so the desktop can run as a per-user service:
+#   systemctl --user enable --now wayfaraway
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(WAYFARAWAY_SYSTEMD_DEFAULT ON)
+else()
+    set(WAYFARAWAY_SYSTEMD_DEFAULT OFF)
+endif()
+option(WAYFARAWAY_SYSTEMD "Install a systemd user service" ${WAYFARAWAY_SYSTEMD_DEFAULT})
+
+if(WAYFARAWAY_SYSTEMD)
+    # Ask systemd where user units go, relative to our prefix, so a
+    # /usr/local install lands in /usr/local/lib/systemd/user.
+    set(systemd_user_unit_dir "${CMAKE_INSTALL_PREFIX}/lib/systemd/user")
+    pkg_check_modules(SYSTEMD QUIET systemd)
+    if(SYSTEMD_FOUND)
+        pkg_get_variable(systemd_pc_user_unit_dir systemd systemduserunitdir
+            DEFINE_VARIABLES prefix=${CMAKE_INSTALL_PREFIX})
+        if(systemd_pc_user_unit_dir)
+            set(systemd_user_unit_dir "${systemd_pc_user_unit_dir}")
+        endif()
+    endif()
+    set(WAYFARAWAY_SYSTEMD_USER_UNIT_DIR "${systemd_user_unit_dir}"
+        CACHE PATH "Directory to install the systemd user unit into")
+
+    configure_file(data/wayfaraway.service.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service @ONLY)
+endif()
 
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/wayfaraway.pam
     DESTINATION ${WAYFARAWAY_PAM_DIR}
     RENAME wayfaraway)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service
-    DESTINATION ${WAYFARAWAY_SYSTEMD_USER_UNIT_DIR})
+if(WAYFARAWAY_SYSTEMD)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.service
+        DESTINATION ${WAYFARAWAY_SYSTEMD_USER_UNIT_DIR})
+endif()
