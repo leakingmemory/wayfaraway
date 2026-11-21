@@ -149,6 +149,24 @@ if(WAYFARAWAY_RC)
     configure_file(data/wayfaraway.rc.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.rc @ONLY)
 endif()
 
+# An OpenRC init script, for Gentoo and other OpenRC systems:
+#   ln -s wayfaraway /etc/init.d/wayfaraway.alice
+#   rc-update add wayfaraway.alice default
+set(WAYFARAWAY_OPENRC_DEFAULT OFF)
+foreach(dir /sbin /usr/sbin /usr/bin)
+    if(EXISTS ${dir}/openrc-run)
+        set(WAYFARAWAY_OPENRC_DEFAULT ON)
+    endif()
+endforeach()
+option(WAYFARAWAY_OPENRC "Install an OpenRC init script" ${WAYFARAWAY_OPENRC_DEFAULT})
+
+if(WAYFARAWAY_OPENRC)
+    # Like PAM, OpenRC only looks in /etc, whatever the install prefix.
+    set(WAYFARAWAY_OPENRC_INITD_DIR "/etc/init.d" CACHE PATH "Directory to install the OpenRC init script into")
+    set(WAYFARAWAY_OPENRC_CONFD_DIR "/etc/conf.d" CACHE PATH "Directory to install the OpenRC service configuration into")
+    configure_file(data/wayfaraway.openrc.in ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.openrc @ONLY)
+endif()
+
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.pam
     DESTINATION ${WAYFARAWAY_PAM_DIR}
@@ -161,4 +179,17 @@ if(WAYFARAWAY_RC)
     install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.rc
         DESTINATION ${WAYFARAWAY_RC_DIR}
         RENAME wayfaraway)
+endif()
+if(WAYFARAWAY_OPENRC)
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/wayfaraway.openrc
+        DESTINATION ${WAYFARAWAY_OPENRC_INITD_DIR}
+        RENAME wayfaraway)
+    # The configuration is the admin's once installed: never overwrite it.
+    install(CODE "
+        if(NOT EXISTS \"\$ENV{DESTDIR}${WAYFARAWAY_OPENRC_CONFD_DIR}/wayfaraway\")
+            file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/data/wayfaraway.confd\"
+                DESTINATION \"${WAYFARAWAY_OPENRC_CONFD_DIR}\"
+                RENAME wayfaraway)
+        endif()
+    ")
 endif()

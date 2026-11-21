@@ -135,6 +135,25 @@ cmake --build build
    service wayfaraway start
    ```
    Output goes to `/var/log/wayfaraway.log` (`wayfaraway_log`).
+
+   On Gentoo and other OpenRC systems, `cmake --install` installs
+   `/etc/init.d/wayfaraway` and, unless it already exists,
+   `/etc/conf.d/wayfaraway`. This happens by default when `openrc-run` is
+   found; `-DWAYFARAWAY_OPENRC=ON/OFF` overrides that. It runs under
+   supervise-daemon, which restarts it if it crashes. Make one instance per
+   user, named after them:
+   ```sh
+   ln -s wayfaraway /etc/init.d/wayfaraway.alice
+   rc-update add wayfaraway.alice default
+   rc-service wayfaraway.alice start
+   ```
+   Options go in `/etc/conf.d/wayfaraway.alice`, for example
+   `WAYFARAWAY_OPTS="--startup 'foot'"`. Output goes to
+   `/var/log/wayfaraway.alice.log`. The Wayland socket lives in
+   `/run/wayfaraway/alice`. That directory is outside `/run/user/<uid>`,
+   which elogind mounts over at login and removes at logout. To share the
+   user's PipeWire there, set `WAYFARAWAY_RUNTIME_DIR=/run/user/<uid>` and
+   run `loginctl enable-linger alice`.
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh

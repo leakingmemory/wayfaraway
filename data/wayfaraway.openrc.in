@@ -1,0 +1,59 @@
+#!/sbin/openrc-run
+# wayfaraway: a headless Wayland desktop served over RDP.
+#
+# The desktop belongs to one user, who unlocks it with their password. Make
+# an instance named after that user:
+#
+#   ln -s wayfaraway /etc/init.d/wayfaraway.alice
+#   rc-update add wayfaraway.alice default
+#
+# or set WAYFARAWAY_USER in /etc/conf.d/wayfaraway and use this script as is.
+
+description="Headless Wayland desktop served over RDP"
+
+if [ "${RC_SVCNAME}" != "${RC_SVCNAME#*.}" ]; then
+	: "${WAYFARAWAY_USER:=${RC_SVCNAME#*.}}"
+fi
+
+command="@CMAKE_INSTALL_FULL_BINDIR@/wayfaraway"
+command_args="${WAYFARAWAY_OPTS}"
+command_user="${WAYFARAWAY_USER}"
+# supervise-daemon restarts it if it crashes.
+supervisor="supervise-daemon"
+respawn_delay=2
+output_log="${WAYFARAWAY_LOG:-/var/log/${RC_SVCNAME}.log}"
+error_log="${output_log}"
+
+depend()
+{
+	need localmount
+	after bootmisc net elogind
+}
+
+start_pre()
+{
+	local group home
+
+	if [ -z "${WAYFARAWAY_USER}" ]; then
+		eerror "Set WAYFARAWAY_USER in /etc/conf.d/${RC_SVCNAME},"
+		eerror "or start an instance named after the user (wayfaraway.<user>)"
+		return 1
+	fi
+	id -u "${WAYFARAWAY_USER}" >/dev/null || return 1
+	group=$(id -gn "${WAYFARAWAY_USER}")
+	home=$(getent passwd "${WAYFARAWAY_USER}" | cut -d: -f6)
+
+	# The Wayland socket's runtime directory: owned by the user and private.
+	# Not /run/user/<uid> by default: elogind mounts a fresh tmpfs there when
+	# the user logs in, which would hide the socket from new apps.
+	if [ -z "${WAYFARAWAY_RUNTIME_DIR}" ]; then
+		checkpath -d -m 0755 -o root:root /run/wayfaraway || return 1
+		WAYFARAWAY_RUNTIME_DIR="/run/wayfaraway/${WAYFARAWAY_USER}"
+	fi
+	checkpath -d -m 0700 -o "${WAYFARAWAY_USER}:${group}" "${WAYFARAWAY_RUNTIME_DIR}" || return 1
+	checkpath -f -m 0640 -o "${WAYFARAWAY_USER}:${group}" "${output_log}" || return 1
+
+	export HOME="${home}" USER="${WAYFARAWAY_USER}" LOGNAME="${WAYFARAWAY_USER}"
+	export XDG_RUNTIME_DIR="${WAYFARAWAY_RUNTIME_DIR}"
+	directory="${home}"
+}

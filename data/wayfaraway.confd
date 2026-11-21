@@ -1,0 +1,19 @@
+# Configuration for /etc/init.d/wayfaraway.
+# An instance such as wayfaraway.alice reads /etc/conf.d/wayfaraway.alice
+# after this file.
+
+# The user who owns the desktop. An instance takes it from its name.
+#WAYFARAWAY_USER="alice"
+
+# Options for wayfaraway, quoted as on a command line.
+#WAYFARAWAY_OPTS="--address 0.0.0.0 --startup 'foot'"
+
+# Log file. The default is /var/log/<service name>.log.
+#WAYFARAWAY_LOG="/var/log/wayfaraway.log"
+
+# Runtime directory for the Wayland socket. The default,
+# /run/wayfaraway/<user>, is one no login manager touches. /run/user/<uid>
+# lets apps on the desktop reach the user's PipeWire and D-Bus, but only with
+# `loginctl enable-linger <user>`: otherwise elogind mounts over it at login
+# and removes it at logout.
+#WAYFARAWAY_RUNTIME_DIR="/run/user/1000"
