@@ -10,12 +10,15 @@ on a lock screen.
 ```
  RDP client ──TLS──▶ FreeRDP listener ──input──▶ virtual wlr_keyboard / cursor ──▶ seat ──▶ clients
                           ▲
-                          └── RemoteFX ◀── shadow framebuffer ◀── pixman render of the scene
+                          └── RemoteFX / NSCodec ◀── shadow framebuffer ◀── pixman render of the scene
 ```
 
 - **Headless backend + pixman renderer.** There is one virtual output. Its size
   follows the RDP client's desktop size. Each frame is rendered on the CPU. Only
   the damaged region is copied into a shadow buffer and encoded with RemoteFX.
+  NSCodec is the fallback for clients without RemoteFX, or with a multifragment
+  size too small for it; damage is split into tiles that fit the client's PDU
+  limit.
 - **Built-in lock screen.** The compositor draws the lock screen itself with
   cairo/pango; no client is involved. While the session is locked, the whole desktop
   scene tree is disabled and no client gets keyboard or pointer focus, so nothing
@@ -57,7 +60,7 @@ cmake --build build
    ./build/wayfaraway --startup 'foot'
    ```
    You can also use the systemd user unit in `data/wayfaraway.service`.
-   Connect with any RemoteFX-capable client, for example
+   Connect with any client that supports RemoteFX or NSCodec, for example
    `xfreerdp /v:host /rfx /cert:ignore`, Remmina or mstsc.
 
 ## Keys
@@ -72,8 +75,8 @@ cmake --build build
 
 ## Status / next steps
 
-- Only RemoteFX is supported. Clients without it are refused. NSCodec/planar
-  fallback and GFX/H.264 are still to come.
+- Clients that support neither RemoteFX nor NSCodec are refused. Planar/raw
+  bitmap fallback and GFX/H.264 are still to come.
 - There's no output backpressure. Frames are sent as fast as they are rendered.
   Frame acknowledgement should throttle this.
 - Clipboard (cliprdr), audio (rdpsnd) and lock-key synchronisation aren't

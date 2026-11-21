@@ -5,6 +5,7 @@
 
 #include <linux/input-event-codes.h>
 
+#include <freerdp/codec/nsc.h>
 #include <freerdp/codec/rfx.h>
 #include <freerdp/constants.h>
 #include <freerdp/crypto/certificate.h>
@@ -23,11 +24,23 @@ namespace wfa {
 namespace {
 
 // RemoteFX frames can be large; clients advertising less than this cannot
-// receive a full-screen update in one fragmented PDU.
-constexpr UINT32 min_multifrag_size = 0x3F0000;
+// receive a full-screen update in one fragmented PDU and fall back to NSCodec.
+constexpr UINT32 min_rfx_multifrag_size = 0x3F0000;
 
 // Beyond this many rectangles, encoding the bounding box is cheaper.
 constexpr int max_rects = 64;
+
+// Room left in each PDU for surface-bits and fast-path headers.
+constexpr UINT32 pdu_header_margin = 1024;
+// Assumed PDU limit for clients that do not advertise multifragment support.
+constexpr UINT32 min_pdu_size = 16 * 1024;
+
+enum class Codec { RemoteFx, NSCodec };
+
+const char* codec_name(Codec codec)
+{
+    return codec == Codec::RemoteFx ? "RemoteFX" : "NSCodec";
+}
 
 std::vector<wl_event_source*> watch_handles(wl_event_loop* loop, HANDLE* handles, DWORD count,
     wl_event_loop_fd_func_t callback, void* data)
@@ -72,6 +85,8 @@ public:
         }
         if (m_rfx)
             rfx_context_free(m_rfx);
+        if (m_nsc)
+            nsc_context_free(m_nsc);
         if (m_stream)
             Stream_Free(m_stream, TRUE);
     }
@@ -99,6 +114,11 @@ public:
     void output_resized();
 
 private:
+    bool choose_codec();
+    void encode_rfx(const pixman_region32_t* region);
+    void encode_nsc(const pixman_region32_t* region);
+    void send_surface_bits(const pixman_box32_t& box, UINT16 codec_id);
+
     struct Context {
         rdpContext base; // must stay first
         RdpPeer* peer;
@@ -127,8 +147,12 @@ private:
     freerdp_peer* m_client;
     std::vector<wl_event_source*> m_sources;
 
+    Codec m_codec = Codec::RemoteFx;
     RFX_CONTEXT* m_rfx = nullptr;
+    NSC_CONTEXT* m_nsc = nullptr;
     wStream* m_stream = nullptr;
+    // Largest encoded payload one surface-bits PDU may carry.
+    UINT32 m_max_payload = 0;
 
     bool m_active = false;
     bool m_suppressed = false;
@@ -169,7 +193,7 @@ bool RdpPeer::init()
         && freerdp_settings_set_bool(s, FreeRDP_NlaSecurity, FALSE)
         && freerdp_settings_set_uint32(s, FreeRDP_ColorDepth, 32)
         && freerdp_settings_set_bool(s, FreeRDP_RemoteFxCodec, TRUE)
-        && freerdp_settings_set_bool(s, FreeRDP_NSCodec, FALSE)
+        && freerdp_settings_set_bool(s, FreeRDP_NSCodec, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_SupportGraphicsPipeline, FALSE)
         && freerdp_settings_set_bool(s, FreeRDP_SurfaceFrameMarkerEnabled, TRUE)
         && freerdp_settings_set_bool(s, FreeRDP_FrameMarkerCommandEnabled, TRUE)
@@ -203,12 +227,8 @@ bool RdpPeer::init()
         return false;
     }
 
-    m_rfx = rfx_context_new(TRUE);
     m_stream = Stream_New(nullptr, 64 * 1024);
-    if (!m_rfx || !m_stream)
-        return false;
-    rfx_context_set_pixel_format(m_rfx, PIXEL_FORMAT_BGRX32);
-    if (!rfx_context_set_mode(m_rfx, RLGR3))
+    if (!m_stream)
         return false;
 
     HANDLE handles[32];
@@ -236,18 +256,13 @@ BOOL RdpPeer::on_post_connect(freerdp_peer* client)
     RdpPeer* self = from(client);
     rdpSettings* s = self->settings();
 
-    if (!freerdp_settings_get_bool(s, FreeRDP_RemoteFxCodec)) {
-        wlr_log(WLR_ERROR, "RDP: client %s does not support RemoteFX; refusing", self->hostname());
+    if (!self->choose_codec())
         return FALSE;
-    }
-    if (freerdp_settings_get_uint32(s, FreeRDP_MultifragMaxRequestSize) < min_multifrag_size) {
-        wlr_log(WLR_ERROR, "RDP: client %s multifragment size too small for RemoteFX; refusing", self->hostname());
-        return FALSE;
-    }
 
     const auto width = static_cast<int>(freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth));
     const auto height = static_cast<int>(freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight));
-    wlr_log(WLR_INFO, "RDP: %s connected, desktop %dx%d", self->hostname(), width, height);
+    wlr_log(WLR_INFO, "RDP: %s connected, desktop %dx%d, %s", self->hostname(), width, height,
+        codec_name(self->m_codec));
 
     // The client's window decides the output size.
     self->compositor().resize_output(std::clamp(width, 320, 8192), std::clamp(height, 240, 8192));
@@ -268,7 +283,9 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
 
     const auto width = freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth);
     const auto height = freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight);
-    if (!rfx_context_reset(self->m_rfx, width, height))
+    if (self->m_rfx && !rfx_context_reset(self->m_rfx, width, height))
+        return FALSE;
+    if (self->m_nsc && !nsc_context_reset(self->m_nsc, width, height))
         return FALSE;
 
     // The cursor is composited into the frames; hide the client's own.
@@ -336,9 +353,66 @@ void RdpPeer::send_region(const pixman_region32_t* region)
         return;
     }
 
-    const pixman_box32_t extents = *pixman_region32_extents(&clipped);
+    const bool markers = freerdp_settings_get_bool(s, FreeRDP_SurfaceFrameMarkerEnabled);
+    rdpContext* context = m_client->context;
+    SURFACE_FRAME_MARKER marker{ SURFACECMD_FRAMEACTION_BEGIN, ++m_frame_id };
+    if (markers)
+        (void)update()->SurfaceFrameMarker(context, &marker);
+
+    if (m_codec == Codec::RemoteFx)
+        encode_rfx(&clipped);
+    else
+        encode_nsc(&clipped);
+
+    if (markers) {
+        marker.frameAction = SURFACECMD_FRAMEACTION_END;
+        (void)update()->SurfaceFrameMarker(context, &marker);
+    }
+    pixman_region32_fini(&clipped);
+}
+
+bool RdpPeer::choose_codec()
+{
+    rdpSettings* s = settings();
+    const UINT32 multifrag = freerdp_settings_get_uint32(s, FreeRDP_MultifragMaxRequestSize);
+    const bool rfx = freerdp_settings_get_bool(s, FreeRDP_RemoteFxCodec) && multifrag >= min_rfx_multifrag_size;
+    const bool nsc = freerdp_settings_get_bool(s, FreeRDP_NSCodec);
+
+    if (rfx) {
+        m_codec = Codec::RemoteFx;
+        m_rfx = rfx_context_new(TRUE);
+        if (!m_rfx)
+            return false;
+        rfx_context_set_pixel_format(m_rfx, PIXEL_FORMAT_BGRX32);
+        return rfx_context_set_mode(m_rfx, RLGR3);
+    }
+
+    if (nsc) {
+        m_codec = Codec::NSCodec;
+        m_max_payload = std::max(multifrag, min_pdu_size) - pdu_header_margin;
+        m_nsc = nsc_context_new();
+        if (!m_nsc)
+            return false;
+        // Use the quality settings the client negotiated.
+        return nsc_context_set_parameters(m_nsc, NSC_COLOR_FORMAT, PIXEL_FORMAT_BGRX32)
+            && nsc_context_set_parameters(m_nsc, NSC_COLOR_LOSS_LEVEL,
+                freerdp_settings_get_uint32(s, FreeRDP_NSCodecColorLossLevel))
+            && nsc_context_set_parameters(m_nsc, NSC_ALLOW_SUBSAMPLING,
+                freerdp_settings_get_bool(s, FreeRDP_NSCodecAllowSubsampling))
+            && nsc_context_set_parameters(m_nsc, NSC_DYNAMIC_COLOR_FIDELITY,
+                freerdp_settings_get_bool(s, FreeRDP_NSCodecAllowDynamicColorFidelity));
+    }
+
+    wlr_log(WLR_ERROR, "RDP: client %s supports neither RemoteFX (multifrag %u) nor NSCodec; refusing",
+        hostname(), multifrag);
+    return false;
+}
+
+void RdpPeer::encode_rfx(const pixman_region32_t* region)
+{
+    const pixman_box32_t extents = *pixman_region32_extents(region);
     int count = 0;
-    const pixman_box32_t* boxes = pixman_region32_rectangles(&clipped, &count);
+    const pixman_box32_t* boxes = pixman_region32_rectangles(region, &count);
 
     std::vector<RFX_RECT> rects;
     auto add_rect = [&](const pixman_box32_t& box) {
@@ -355,43 +429,77 @@ void RdpPeer::send_region(const pixman_region32_t* region)
         for (int i = 0; i < count; ++i)
             add_rect(boxes[i]);
     }
-    pixman_region32_fini(&clipped);
 
-    const UINT32 ext_w = static_cast<UINT32>(extents.x2 - extents.x1);
-    const UINT32 ext_h = static_cast<UINT32>(extents.y2 - extents.y1);
     const std::size_t stride = m_server.stride();
     const auto* origin = reinterpret_cast<const BYTE*>(m_server.shadow() + extents.y1 * stride + extents.x1 * 4);
 
     Stream_SetPosition(m_stream, 0);
-    if (!rfx_compose_message(m_rfx, m_stream, rects.data(), rects.size(), origin, ext_w, ext_h,
+    if (!rfx_compose_message(m_rfx, m_stream, rects.data(), rects.size(), origin,
+            static_cast<UINT32>(extents.x2 - extents.x1), static_cast<UINT32>(extents.y2 - extents.y1),
             static_cast<UINT32>(stride))) {
         wlr_log(WLR_ERROR, "RDP: RemoteFX encoding failed");
         return;
     }
+    send_surface_bits(extents, static_cast<UINT16>(freerdp_settings_get_uint32(settings(), FreeRDP_RemoteFxCodecId)));
+}
 
+void RdpPeer::encode_nsc(const pixman_region32_t* region)
+{
+    // NSCodec carries one rectangle per message and has no tiling of its
+    // own, so split each box into tiles whose worst-case encoding (four
+    // planes, padded to 8x2) fits in a single PDU.
+    const auto codec_id = static_cast<UINT16>(freerdp_settings_get_uint32(settings(), FreeRDP_NSCodecId));
+    const std::size_t stride = m_server.stride();
+    const auto worst_case = [](int w, int h) {
+        return static_cast<UINT64>((w + 7) & ~7) * static_cast<UINT64>((h + 1) & ~1) * 4;
+    };
+
+    int count = 0;
+    const pixman_box32_t* boxes = pixman_region32_rectangles(region, &count);
+    for (int i = 0; i < count; ++i) {
+        const pixman_box32_t& box = boxes[i];
+        const int box_w = box.x2 - box.x1;
+
+        // Widest tile that still fits two rows, then as many rows as fit.
+        int tile_w = box_w;
+        while (tile_w > 8 && worst_case(tile_w, 2) > m_max_payload)
+            tile_w = (tile_w + 1) / 2;
+        int tile_h = 2;
+        while (tile_h < box.y2 - box.y1 && worst_case(tile_w, tile_h * 2) <= m_max_payload)
+            tile_h *= 2;
+
+        for (int y = box.y1; y < box.y2; y += tile_h) {
+            for (int x = box.x1; x < box.x2; x += tile_w) {
+                const pixman_box32_t tile{ x, y, std::min(x + tile_w, box.x2), std::min(y + tile_h, box.y2) };
+                const auto* origin = reinterpret_cast<const BYTE*>(m_server.shadow() + y * stride + x * 4);
+
+                Stream_SetPosition(m_stream, 0);
+                if (!nsc_compose_message(m_nsc, m_stream, origin, static_cast<UINT32>(tile.x2 - tile.x1),
+                        static_cast<UINT32>(tile.y2 - tile.y1), static_cast<UINT32>(stride))) {
+                    wlr_log(WLR_ERROR, "RDP: NSCodec encoding failed");
+                    return;
+                }
+                send_surface_bits(tile, codec_id);
+            }
+        }
+    }
+}
+
+void RdpPeer::send_surface_bits(const pixman_box32_t& box, UINT16 codec_id)
+{
     SURFACE_BITS_COMMAND cmd{};
     cmd.cmdType = CMDTYPE_STREAM_SURFACE_BITS;
-    cmd.destLeft = static_cast<UINT32>(extents.x1);
-    cmd.destTop = static_cast<UINT32>(extents.y1);
-    cmd.destRight = static_cast<UINT32>(extents.x2);
-    cmd.destBottom = static_cast<UINT32>(extents.y2);
+    cmd.destLeft = static_cast<UINT32>(box.x1);
+    cmd.destTop = static_cast<UINT32>(box.y1);
+    cmd.destRight = static_cast<UINT32>(box.x2);
+    cmd.destBottom = static_cast<UINT32>(box.y2);
     cmd.bmp.bpp = 32;
-    cmd.bmp.codecID = static_cast<UINT16>(freerdp_settings_get_uint32(s, FreeRDP_RemoteFxCodecId));
-    cmd.bmp.width = static_cast<UINT16>(ext_w);
-    cmd.bmp.height = static_cast<UINT16>(ext_h);
+    cmd.bmp.codecID = codec_id;
+    cmd.bmp.width = static_cast<UINT16>(box.x2 - box.x1);
+    cmd.bmp.height = static_cast<UINT16>(box.y2 - box.y1);
     cmd.bmp.bitmapDataLength = static_cast<UINT32>(Stream_GetPosition(m_stream));
     cmd.bmp.bitmapData = Stream_Buffer(m_stream);
-
-    const bool markers = freerdp_settings_get_bool(s, FreeRDP_SurfaceFrameMarkerEnabled);
-    rdpContext* context = m_client->context;
-    SURFACE_FRAME_MARKER marker{ SURFACECMD_FRAMEACTION_BEGIN, ++m_frame_id };
-    if (markers)
-        (void)update()->SurfaceFrameMarker(context, &marker);
-    (void)update()->SurfaceBits(context, &cmd);
-    if (markers) {
-        marker.frameAction = SURFACECMD_FRAMEACTION_END;
-        (void)update()->SurfaceFrameMarker(context, &marker);
-    }
+    (void)update()->SurfaceBits(m_client->context, &cmd);
 }
 
 BOOL RdpPeer::on_synchronize(rdpInput* input, UINT32 flags)
