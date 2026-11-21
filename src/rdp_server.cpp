@@ -8,6 +8,7 @@
 
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/cliprdr.h>
+#include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/rdpsnd.h>
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/codec/nsc.h>
@@ -26,8 +27,11 @@
 #include <winpr/wtsapi.h>
 
 #include "audio_sink.hpp"
+#include "audio_source.hpp"
 #include "clipboard.hpp"
+#include "pipewire.hpp"
 #include "rdp_audio.hpp"
+#include "rdp_microphone.hpp"
 
 namespace wfa {
 
@@ -134,6 +138,7 @@ public:
         // Gives up the client's clipboard offer on the seat right away.
         m_clipboard.reset();
         m_audio.reset();
+        m_microphone.reset(); // joins FreeRDP's audin thread
         remove_sources(m_sources);
         if (m_ack_timer) {
             wl_event_source_remove(m_ack_timer);
@@ -152,6 +157,13 @@ public:
             m_clipboard->set_locked(locked);
         if (m_audio)
             m_audio->set_locked(locked);
+        update_microphone();
+    }
+
+    void set_microphone_demand(bool wanted)
+    {
+        m_microphone_demand = wanted;
+        update_microphone();
     }
 
     void push_audio(std::span<const std::byte> samples)
@@ -161,6 +173,13 @@ public:
     }
 
 private:
+    // The client's microphone is open only while unlocked and recording.
+    void update_microphone()
+    {
+        if (m_microphone)
+            m_microphone->set_open(m_microphone_demand && !compositor().locked());
+    }
+
     bool choose_codec();
     UINT32 frames_in_flight() const { return m_frame_id - m_last_acked; }
     bool throttled() const { return m_ack_throttle && frames_in_flight() >= m_max_in_flight; }
@@ -204,6 +223,8 @@ private:
     HANDLE m_vcm = nullptr;
     std::unique_ptr<Clipboard> m_clipboard;
     std::unique_ptr<RdpAudio> m_audio;
+    std::unique_ptr<RdpMicrophone> m_microphone;
+    bool m_microphone_demand = false;
 
     Codec m_codec = Codec::RemoteFx;
     RFX_CONTEXT* m_rfx = nullptr;
@@ -391,6 +412,15 @@ BOOL RdpPeer::on_activate(freerdp_peer* client)
         if (!self->m_audio)
             wlr_log(WLR_ERROR, "RDP: audio unavailable for %s", self->hostname());
     }
+    // audin is a dynamic channel, carried by drdynvc.
+    if (!self->m_microphone && WTSVirtualChannelManagerIsChannelJoined(self->m_vcm, DRDYNVC_SVC_CHANNEL_NAME)) {
+        RdpServer& server = self->m_server;
+        self->m_microphone = RdpMicrophone::create(self->compositor().event_loop(), self->m_vcm, client->context,
+            [&server](std::span<const std::byte> samples) { server.deliver_microphone(samples); });
+        if (!self->m_microphone)
+            wlr_log(WLR_ERROR, "RDP: microphone unavailable for %s", self->hostname());
+    }
+    self->set_microphone_demand(self->m_server.microphone_wanted());
 
     // The cursor is composited into the frames; hide the client's own.
     POINTER_SYSTEM_UPDATE pointer{};
@@ -799,7 +829,9 @@ RdpServer::~RdpServer()
     m_server.on_lock_changed = nullptr;
     m_peer.reset();
 #ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    m_microphone.reset();
     m_audio.reset();
+    m_pipewire.reset();
 #endif
     m_dead_peers.clear();
     if (m_reaper)
@@ -827,16 +859,28 @@ bool RdpServer::listen()
     // Required before any WTS virtual channel call.
     WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());
     m_server.on_lock_changed = [this](bool locked) {
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+        // Do not play out microphone audio captured before the lock.
+        if (locked && m_microphone)
+            m_microphone->flush();
+#endif
         if (m_peer)
             m_peer->lock_changed(locked);
     };
 
 #ifdef WAYFARAWAY_HAVE_PIPEWIRE
-    // Optional: without PipeWire the desktop simply has no audio output.
-    m_audio = AudioSink::create(m_server.event_loop(), [this](std::span<const std::byte> samples) {
-        if (m_peer)
-            m_peer->push_audio(samples);
-    });
+    // Optional: without PipeWire the desktop simply has no audio.
+    m_pipewire = PipeWire::connect(m_server.event_loop());
+    if (m_pipewire) {
+        m_audio = AudioSink::create(*m_pipewire, [this](std::span<const std::byte> samples) {
+            if (m_peer)
+                m_peer->push_audio(samples);
+        });
+        m_microphone = AudioSource::create(*m_pipewire, [this](bool recording) {
+            if (m_peer)
+                m_peer->set_microphone_demand(recording);
+        });
+    }
 #endif
 
     m_listener = freerdp_listener_new();
@@ -890,6 +934,23 @@ bool RdpServer::accept(freerdp_peer* client)
     m_peer = std::move(peer);
     m_server.lock();
     return true;
+}
+
+bool RdpServer::microphone_wanted() const
+{
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    return m_microphone && m_microphone->recording();
+#else
+    return false;
+#endif
+}
+
+void RdpServer::deliver_microphone(std::span<const std::byte> samples)
+{
+#ifdef WAYFARAWAY_HAVE_PIPEWIRE
+    if (m_microphone && !m_server.locked())
+        m_microphone->push(samples);
+#endif
 }
 
 void RdpServer::peer_closed(RdpPeer* peer)

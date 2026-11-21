@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "server.hpp"
@@ -14,6 +15,8 @@ namespace wfa {
 
 class RdpPeer;
 class AudioSink;
+class AudioSource;
+class PipeWire;
 
 // Accepts RDP connections and streams the virtual output to the active peer
 // using RemoteFX surface commands. Only one peer is active at a time: a new
@@ -42,6 +45,10 @@ public:
 
     // Called by RdpPeer.
     void peer_closed(RdpPeer* peer);
+    // Whether a desktop application is recording from the RDP microphone.
+    bool microphone_wanted() const;
+    // Samples from the client's microphone, in audio:: format.
+    void deliver_microphone(std::span<const std::byte> samples);
 
 private:
     static int on_listener_event(int fd, uint32_t mask, void* data);
@@ -60,7 +67,10 @@ private:
 
 #ifdef WAYFARAWAY_HAVE_PIPEWIRE
     // Shared by successive peers, so audio routing survives reconnects.
+    // Declared before the nodes so it is destroyed after them.
+    std::unique_ptr<PipeWire> m_pipewire;
     std::unique_ptr<AudioSink> m_audio;
+    std::unique_ptr<AudioSource> m_microphone;
 #endif
 
     std::vector<std::byte> m_shadow;

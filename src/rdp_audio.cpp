@@ -6,7 +6,7 @@
 #include <winpr/synch.h>
 #include <winpr/wtsapi.h>
 
-#include "audio_sink.hpp"
+#include "audio_format.hpp"
 #include "wlr.hpp"
 
 namespace wfa {
@@ -21,11 +21,11 @@ AUDIO_FORMAT pcm_format()
 {
     AUDIO_FORMAT format{};
     format.wFormatTag = WAVE_FORMAT_PCM;
-    format.nChannels = AudioSink::channels;
-    format.nSamplesPerSec = AudioSink::rate;
+    format.nChannels = audio::channels;
+    format.nSamplesPerSec = audio::rate;
     format.wBitsPerSample = 16;
-    format.nBlockAlign = AudioSink::bytes_per_frame;
-    format.nAvgBytesPerSec = AudioSink::rate * AudioSink::bytes_per_frame;
+    format.nBlockAlign = audio::bytes_per_frame;
+    format.nAvgBytesPerSec = audio::rate * audio::bytes_per_frame;
     return format;
 }
 
@@ -101,12 +101,12 @@ void RdpAudio::on_activated(RdpsndServerContext* context)
         if (audio_format_compatible(&server_format, &context->client_formats[i])) {
             if (context->SelectFormat(context, i) == CHANNEL_RC_OK) {
                 self->m_format_selected = true;
-                wlr_log(WLR_INFO, "Audio: streaming PCM %u Hz stereo to the client", AudioSink::rate);
+                wlr_log(WLR_INFO, "Audio: streaming PCM %u Hz stereo to the client", audio::rate);
             }
             return;
         }
     }
-    wlr_log(WLR_INFO, "Audio: client offers no PCM %u Hz stereo format; audio disabled", AudioSink::rate);
+    wlr_log(WLR_INFO, "Audio: client offers no PCM %u Hz stereo format; audio disabled", audio::rate);
 }
 
 void RdpAudio::push(std::span<const std::byte> samples)
@@ -114,7 +114,7 @@ void RdpAudio::push(std::span<const std::byte> samples)
     if (!m_format_selected || m_locked || samples.empty())
         return;
     const auto timestamp = static_cast<UINT16>(winpr_GetTickCount64() & 0xFFFF);
-    (void)m_context->SendSamples(m_context, samples.data(), samples.size() / AudioSink::bytes_per_frame, timestamp);
+    (void)m_context->SendSamples(m_context, samples.data(), samples.size() / audio::bytes_per_frame, timestamp);
 }
 
 } // namespace wfa

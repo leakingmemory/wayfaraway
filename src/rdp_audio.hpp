@@ -12,7 +12,7 @@ typedef struct s_rdpsnd_server_context RdpsndServerContext;
 namespace wfa {
 
 // The rdpsnd (audio output) channel of one RDP peer. Samples are in
-// AudioSink's format; FreeRDP converts them to the client's chosen format.
+// audio:: format; FreeRDP converts them to the client's chosen format.
 // Nothing is played while the session is locked.
 class RdpAudio {
 public:
