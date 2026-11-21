@@ -35,6 +35,7 @@
 #include "rdp_audio.hpp"
 #include "rdp_display.hpp"
 #include "rdp_microphone.hpp"
+#include "tls_certificate.hpp"
 
 namespace wfa {
 
@@ -969,14 +970,19 @@ bool RdpServer::listen()
 {
     const Config& config = m_server.config();
 
-    if (!std::filesystem::exists(config.tls_cert) || !std::filesystem::exists(config.tls_key)) {
-        wlr_log(WLR_ERROR,
-            "TLS certificate or key missing (%s, %s). Create them with:\n"
-            "  openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj /CN=wayfaraway \\\n"
-            "      -keyout %s -out %s",
-            config.tls_cert.c_str(), config.tls_key.c_str(), config.tls_key.c_str(), config.tls_cert.c_str());
+    auto generated = ensure_tls_certificate(config.tls_cert, config.tls_key);
+    if (!generated) {
+        wlr_log(WLR_ERROR, "TLS: %s", generated.error().c_str());
         return false;
     }
+    if (*generated)
+        wlr_log(WLR_INFO, "TLS: generated a self-signed certificate in %s", config.tls_cert.c_str());
+
+    // Clients show this on first connect; compare before trusting it.
+    if (auto fingerprint = tls_certificate_fingerprint(config.tls_cert))
+        wlr_log(WLR_INFO, "TLS: certificate SHA-256 fingerprint %s", fingerprint->c_str());
+    else
+        wlr_log(WLR_ERROR, "TLS: %s", fingerprint.error().c_str());
 
     // Required before any WTS virtual channel call.
     WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());

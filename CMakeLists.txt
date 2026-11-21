@@ -16,6 +16,7 @@ endif()
 
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
 
 pkg_check_modules(WLROOTS   REQUIRED IMPORTED_TARGET wlroots-0.20)
 pkg_check_modules(WAYLAND   REQUIRED IMPORTED_TARGET wayland-server)
@@ -46,6 +47,7 @@ add_executable(wayfaraway
     src/rdp_display.cpp
     src/rdp_microphone.cpp
     src/rdp_server.cpp
+    src/tls_certificate.cpp
 )
 
 if(PIPEWIRE_FOUND)
@@ -79,6 +81,7 @@ target_link_libraries(wayfaraway PRIVATE
     PkgConfig::PANGO
     PkgConfig::FREERDP
     PkgConfig::PAM
+    OpenSSL::Crypto
 )
 
 install(TARGETS wayfaraway RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

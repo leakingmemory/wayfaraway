@@ -74,12 +74,16 @@ cmake --build build
 ## Setup
 
 1. **TLS certificate.** RDP is TLS-only. NLA is off because authentication
-   happens on the lock screen.
-   ```sh
-   mkdir -p ~/.config/wayfaraway
-   openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj /CN=wayfaraway \
-       -keyout ~/.config/wayfaraway/tls.key -out ~/.config/wayfaraway/tls.crt
+   happens on the lock screen. On first start, the compositor generates a
+   self-signed certificate in `~/.config/wayfaraway/` (`tls.crt`, plus `tls.key`
+   with mode 0600). It is RSA-3072, valid for 10 years, and covers the hostname
+   and localhost. Every start logs its SHA-256 fingerprint:
    ```
+   TLS: certificate SHA-256 fingerprint 3A:F1:…
+   ```
+   Compare it with what your client shows the first time it asks whether to
+   trust the server. To use your own certificate, pass `--cert`/`--key` or put
+   the files in place. To get a fresh one, delete both files.
 2. **PAM service.** Install `data/wayfaraway.pam` as `/etc/pam.d/wayfaraway`
    (`cmake --install` does this). It includes `system-local-login`; adjust that
    for your distribution. Without the file, PAM falls back to the `other`
@@ -95,7 +99,7 @@ cmake --build build
    ssh -L 3389:localhost:3389 user@host
    ```
    Then connect any client that supports RemoteFX or NSCodec to `localhost`,
-   for example `xfreerdp /v:localhost /rfx /multimon /dynamic-resolution /sound /microphone /cert:ignore`,
+   for example `xfreerdp /v:localhost /rfx /multimon /dynamic-resolution /sound /microphone /cert:tofu`,
    Remmina or mstsc. Pass `--address 0.0.0.0` to accept connections from the
    network directly. Audio needs a
    running PipeWire user session and a client with sound redirection enabled.

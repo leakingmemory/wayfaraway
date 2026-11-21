@@ -21,6 +21,7 @@ Options:
   -p, --port PORT         RDP listen port (default: 3389)
       --cert FILE         TLS certificate (default: $CONFIG/tls.crt)
       --key FILE          TLS private key (default: $CONFIG/tls.key)
+                          A self-signed pair is generated if both are missing.
       --size WxH          Initial output size (default: 1920x1080)
       --pam-service NAME  PAM service used to unlock (default: {})
   -t, --terminal CMD      Terminal launched with Alt+Return (default: foot)
