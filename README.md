@@ -185,6 +185,23 @@ cmake --build build
    `s6-rc-compile` and `s6-rc-update`. s6 restarts the desktop if it exits,
    and s6-log keeps the log in `/var/log/wayfaraway/`. The socket lives in
    `/run/wayfaraway/<user>` unless `WAYFARAWAY_RUNTIME_DIR` says otherwise.
+
+   On dinit systems such as Chimera Linux or Artix, `cmake --install`
+   installs the service templates `wayfaraway@` and `wayfaraway-setup@` into
+   `/etc/dinit.d`, plus their helper scripts in `${PREFIX}/libexec/wayfaraway`.
+   This happens by default when `dinit` is found; `-DWAYFARAWAY_DINIT=ON/OFF`
+   overrides that. Each user gets an instance named after them:
+   ```sh
+   dinitctl enable wayfaraway@alice
+   ```
+   `wayfaraway-setup@alice` creates the runtime directory as root, then
+   `wayfaraway@alice` runs the desktop as alice and restarts it if it exits.
+   Settings go in `/etc/dinit.d/config/wayfaraway.conf`, which is only
+   installed if it doesn't exist yet. Settings for one user go in
+   `wayfaraway-alice.conf` beside it. The log is
+   `/var/log/wayfaraway-alice.log`, and the socket lives in
+   `/run/wayfaraway/alice` unless `WAYFARAWAY_RUNTIME_DIR` says otherwise.
+
    By default it only listens on `127.0.0.1:3389`. From another machine, tunnel
    it over SSH:
    ```sh

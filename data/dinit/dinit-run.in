@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs the desktop of a wayfaraway@<user> instance, as that user.
+. "@CMAKE_INSTALL_FULL_LIBEXECDIR@/wayfaraway/dinit-common.sh"
+
+HOME=$(getent passwd "${WAYFARAWAY_USER}" | cut -d: -f6)
+USER="${WAYFARAWAY_USER}"
+LOGNAME="${WAYFARAWAY_USER}"
+XDG_RUNTIME_DIR="${WAYFARAWAY_RUNTIME_DIR}"
+export HOME USER LOGNAME XDG_RUNTIME_DIR
+cd "${HOME}" || cd /
+
+# eval, so quoting in WAYFARAWAY_OPTS is honoured.
+eval "exec @CMAKE_INSTALL_FULL_BINDIR@/wayfaraway ${WAYFARAWAY_OPTS}"

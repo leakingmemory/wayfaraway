@@ -1,0 +1,12 @@
+# Shared by dinit-setup and dinit-run: reads the settings for user $1.
+WAYFARAWAY_USER="$1"
+if [ -z "${WAYFARAWAY_USER}" ]; then
+	echo "usage: $0 <user>" >&2
+	exit 1
+fi
+for conf in "@WAYFARAWAY_DINIT_CONF_DIR@/wayfaraway.conf" \
+	"@WAYFARAWAY_DINIT_CONF_DIR@/wayfaraway-${WAYFARAWAY_USER}.conf"; do
+	[ -r "${conf}" ] && . "${conf}"
+done
+# Not /run/user/<uid> by default, which elogind and turnstile manage per login.
+: "${WAYFARAWAY_RUNTIME_DIR:=/run/wayfaraway/${WAYFARAWAY_USER}}"

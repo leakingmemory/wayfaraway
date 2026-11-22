@@ -1,0 +1,3 @@
+# Creates the runtime directory for wayfaraway@<user>, as root.
+type = scripted
+command = @CMAKE_INSTALL_FULL_LIBEXECDIR@/wayfaraway/dinit-setup $1

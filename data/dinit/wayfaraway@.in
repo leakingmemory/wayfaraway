@@ -1,0 +1,16 @@
+# wayfaraway: a headless Wayland desktop served over RDP.
+#
+# The desktop belongs to one user, who unlocks it with their password. Enable
+# an instance named after that user:
+#
+#   dinitctl enable wayfaraway@alice
+#
+# Settings: @WAYFARAWAY_DINIT_CONF_DIR@/wayfaraway.conf, then
+# wayfaraway-<user>.conf.
+type = process
+command = @CMAKE_INSTALL_FULL_LIBEXECDIR@/wayfaraway/dinit-run $1
+run-as = $1
+depends-on = wayfaraway-setup@$1
+restart = true
+smooth-recovery = true
+logfile = /var/log/wayfaraway-$1.log

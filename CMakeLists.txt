@@ -198,6 +198,24 @@ if(WAYFARAWAY_S6)
     configure_file(data/s6/wayfaraway-srv/run.in ${CMAKE_CURRENT_BINARY_DIR}/s6/run @ONLY)
 endif()
 
+# dinit service templates, for Chimera Linux, Artix and other dinit systems:
+#   dinitctl enable wayfaraway@alice
+set(WAYFARAWAY_DINIT_DEFAULT OFF)
+foreach(dir /sbin /usr/sbin /usr/bin /bin)
+    if(EXISTS ${dir}/dinit)
+        set(WAYFARAWAY_DINIT_DEFAULT ON)
+    endif()
+endforeach()
+option(WAYFARAWAY_DINIT "Install dinit service templates" ${WAYFARAWAY_DINIT_DEFAULT})
+
+if(WAYFARAWAY_DINIT)
+    set(WAYFARAWAY_DINIT_DIR "/etc/dinit.d" CACHE PATH "Directory to install the dinit services into")
+    set(WAYFARAWAY_DINIT_CONF_DIR "/etc/dinit.d/config" CACHE PATH "Directory to install the dinit service configuration into")
+    foreach(file wayfaraway@ wayfaraway-setup@ common.sh dinit-setup dinit-run)
+        configure_file(data/dinit/${file}.in ${CMAKE_CURRENT_BINARY_DIR}/dinit/${file} @ONLY)
+    endforeach()
+endif()
+
 # Installs a configuration file only if there is none yet: once installed, it
 # is the admin's.
 function(wayfaraway_install_config source destination name)
@@ -248,4 +266,17 @@ if(WAYFARAWAY_S6)
         DESTINATION ${WAYFARAWAY_S6_SV_DIR}/wayfaraway-log)
     wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/s6/wayfaraway.conf
         ${WAYFARAWAY_S6_CONF_DIR} wayfaraway.conf)
+endif()
+if(WAYFARAWAY_DINIT)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dinit/wayfaraway@
+        ${CMAKE_CURRENT_BINARY_DIR}/dinit/wayfaraway-setup@
+        DESTINATION ${WAYFARAWAY_DINIT_DIR})
+    install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/dinit/dinit-setup
+        ${CMAKE_CURRENT_BINARY_DIR}/dinit/dinit-run
+        DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/wayfaraway)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dinit/common.sh
+        DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/wayfaraway
+        RENAME dinit-common.sh)
+    wayfaraway_install_config(${CMAKE_CURRENT_SOURCE_DIR}/data/dinit/wayfaraway.conf
+        ${WAYFARAWAY_DINIT_CONF_DIR} wayfaraway.conf)
 endif()

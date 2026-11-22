@@ -1,0 +1,11 @@
+#!/bin/sh
+# Creates the Wayland socket's runtime directory for a wayfaraway@<user>
+# instance: owned by the user and private to them.
+. "@CMAKE_INSTALL_FULL_LIBEXECDIR@/wayfaraway/dinit-common.sh"
+
+uid=$(id -u "${WAYFARAWAY_USER}") || exit 1
+gid=$(id -g "${WAYFARAWAY_USER}")
+if [ "${WAYFARAWAY_RUNTIME_DIR}" = "/run/wayfaraway/${WAYFARAWAY_USER}" ]; then
+	install -d -m 0755 -o root -g root /run/wayfaraway || exit 1
+fi
+exec install -d -m 0700 -o "${uid}" -g "${gid}" "${WAYFARAWAY_RUNTIME_DIR}"
